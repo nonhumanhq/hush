@@ -21,5 +21,12 @@ go run ./cmd/hush scan --range origin/main..HEAD  # new commits
 go run ./cmd/hush scan --label issue-body --stdin < body.md
 ```
 
+Two more commands bring the generic tier to agents:
+
+```sh
+hush hooks install                              # pre-commit, commit-msg and pre-push hooks
+hush gh -- pr create -t TITLE -F body.md        # scan what gh would post, then run gh
+```
+
 Exit status: 0 clean, 1 findings, 2 usage or configuration error. The public Go package,
 destinations and machine-readable output arrive with v0.1 (ADR-001, ADR-002).

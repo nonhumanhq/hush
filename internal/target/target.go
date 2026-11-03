@@ -27,6 +27,9 @@ type Scan struct {
 	// as in the interim (HSH-5/D7). Pass hush's own unwrapped, so exec hands
 	// over the descriptor instead of copying it. Nil gives /dev/null.
 	GitStdin io.Reader
+	// IndexFile is the absolute path of the index file Index reads, or "" for
+	// the one git finds itself (HSH-9/D5).
+	IndexFile string
 }
 
 // ErrOutput stops a target at the first findings it cannot write. The caller

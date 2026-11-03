@@ -70,11 +70,13 @@ is a port of `reference/interim-hush/` at parity, and everything is internal.
 ## Packages
 | Package | Holds |
 | --- | --- |
-| `cmd/hush` | `hush scan` (the interim scanner's arguments), `hush --help`, `hush version` |
+| `cmd/hush` | `hush scan` (the interim scanner's arguments), `hush hooks`, `hush gh`, `hush --help`, `hush version` |
 | `internal/target` | Tree, standard input, git range and git index targets; the only package that runs git or opens scanned files |
 | `internal/rule` | The `Rule` interface, the `id-prefix`, `ip-address` and `email-address` rules and their registry, and the checks and path redaction a rule list gives |
 | `internal/termset` | The term-file parser and matcher; takes bytes, never a path |
 | `internal/output` | The plain finding line and the error line |
+| `internal/hooks` | The git hooks `hush hooks` writes and removes, and the `GIT_INDEX_FILE` check; CLI only |
+| `internal/ghwrap` | What `hush gh` covers, reading a `gh` command line, and the one launch of `gh`; CLI only |
 | `internal/leakcheck` | Synthetic terms and tokens, and the leak check every test uses |
 
 ## Tests

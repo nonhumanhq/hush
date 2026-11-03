@@ -20,11 +20,18 @@ import (
 const usage = `usage: hush scan [--terms FILE] PATH...
        hush scan [--terms FILE] [-C DIR] --range REVS
        hush scan [--terms FILE] [--label NAME] --stdin
+       hush hooks install [--force] [--terms FILE] | uninstall
+       hush hooks pre-commit [--terms FILE]
+       hush gh -- GH-ARGUMENTS
        hush version
 
 hush keeps private names out of public records. It is pre-release: "hush scan"
 takes the interim scanner's arguments and gives its output, and "hush scan
---help" describes them. "hush version" prints the version.
+--help" describes them. "hush hooks" installs git hooks that scan commits and
+pushes, and "hush hooks pre-commit" is the command the installed pre-commit
+hook runs. "hush gh" scans the text a gh command would post before it runs gh.
+"hush hooks --help" and "hush gh --help" describe them. "hush version" prints
+the version.
 `
 
 const scanUsage = `usage: hush scan [--terms FILE] PATH...
@@ -71,6 +78,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		output.Error(stderr, "no command (see hush --help)")
 	case args[0] == "scan":
 		return scan(args[1:], stdin, stdout, stderr)
+	case args[0] == "hooks":
+		return hooksCommand(args[1:], stdout, stderr)
+	case args[0] == "gh":
+		return ghCommand(args[1:], stdin, stdout, stderr)
 	case args[0] == "-h" || args[0] == "--help":
 		io.WriteString(stdout, usage)
 		return 0
@@ -160,7 +171,7 @@ parse:
 	case hasLabel && !useStdin:
 		return fail("--label works only with --stdin")
 	}
-	s := &target.Scan{Rules: rule.Registry(nil), Out: out, Terms: terms, GitStderr: stderr, GitStdin: stdin}
+	s := &target.Scan{Rules: genericRules(), Out: out, Terms: terms, GitStderr: stderr, GitStdin: stdin}
 	if terms != "" {
 		sets, err := loadTerms(terms)
 		if err != nil {
@@ -190,6 +201,11 @@ parse:
 	}
 	return 0
 }
+
+// genericRules returns the generic tier, the rules every scan applies. hush
+// scan, hush hooks pre-commit and hush gh all take their list from here
+// (HSH-9/D12).
+func genericRules() rule.List { return rule.Registry(nil) }
 
 // loadTerms reads and parses the term file named by --terms.
 func loadTerms(path string) ([]*termset.Set, error) {

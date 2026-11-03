@@ -19,6 +19,7 @@ import (
 type git struct {
 	dir    string    // for -C, or "" for the current directory
 	stderr io.Writer // where relayed calls send git's standard error
+	index  string    // GIT_INDEX_FILE for every call, or "" for the inherited one
 }
 
 func (g git) cmd(args ...string) *exec.Cmd {
@@ -27,6 +28,9 @@ func (g git) cmd(args ...string) *exec.Cmd {
 	}
 	c := exec.Command("git", args...)
 	c.Env = append(os.Environ(), "LC_ALL=C", "GIT_NO_REPLACE_OBJECTS=1")
+	if g.index != "" {
+		c.Env = append(c.Env, "GIT_INDEX_FILE="+g.index) // the last value of a name wins
+	}
 	return c
 }
 
@@ -57,7 +61,7 @@ var diffFlags = []string{"-c", "core.quotePath=false", "diff-tree", "-r", "-p", 
 // first parent or, for a root commit, the empty tree. revs is split on
 // spaces, tabs and newlines, as the shell splits it.
 func (s *Scan) Range(repo, revs string) error {
-	g := git{repo, s.GitStderr}
+	g := git{dir: repo, stderr: s.GitStderr}
 	if err := g.check(); err != nil {
 		return err
 	}
@@ -192,9 +196,10 @@ func hunkStart(line string) int {
 // work tree. Paths are relative to the top of the work tree, and findings
 // read like a tree scan's: rules match and redact the raw path, which then
 // prints with git's escapes. The interim has no index target, so no flag
-// reaches this yet (HSH-5/D6).
+// reaches this yet (HSH-5/D6). Every git call gets s.IndexFile, when set, as
+// GIT_INDEX_FILE (HSH-9/D5).
 func (s *Scan) Index(repo string) error {
-	g := git{repo, s.GitStderr}
+	g := git{dir: repo, stderr: s.GitStderr, index: s.IndexFile}
 	if err := g.check(); err != nil {
 		return err
 	}
