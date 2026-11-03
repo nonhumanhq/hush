@@ -3,6 +3,7 @@ package target
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -15,19 +16,35 @@ import (
 	"github.com/nonhumanhq/hush/internal/rule"
 )
 
-// git runs git plumbing in a repository, with the interim's environment.
+// git runs git plumbing in a repository, with the interim's environment, or,
+// for a scan through package hush's API, without the GIT_ variables.
 type git struct {
-	dir    string    // for -C, or "" for the current directory
-	stderr io.Writer // where relayed calls send git's standard error
-	index  string    // GIT_INDEX_FILE for every call, or "" for the inherited one
+	dir    string          // for -C, or "" for the current directory
+	stderr io.Writer       // where relayed calls send git's standard error
+	index  string          // GIT_INDEX_FILE for every call, or "" for none set here
+	ctx    context.Context // ends every call once done, or nil
+	// noGit drops every inherited GIT_ variable, so that GIT_DIR,
+	// GIT_WORK_TREE, GIT_INDEX_FILE and the rest, as a git hook sets them,
+	// cannot point the scan at another repository or index (HSH-11/D31). The
+	// command line keeps the interim's environment until part d's fixed one.
+	noGit bool
 }
 
 func (g git) cmd(args ...string) *exec.Cmd {
 	if g.dir != "" {
 		args = append([]string{"-C", g.dir}, args...)
 	}
-	c := exec.Command("git", args...)
-	c.Env = append(os.Environ(), "LC_ALL=C", "GIT_NO_REPLACE_OBJECTS=1")
+	var c *exec.Cmd
+	if g.ctx != nil {
+		c = exec.CommandContext(g.ctx, "git", args...)
+	} else {
+		c = exec.Command("git", args...)
+	}
+	env := os.Environ()
+	if g.noGit {
+		env = slices.DeleteFunc(env, func(kv string) bool { return strings.HasPrefix(kv, "GIT_") })
+	}
+	c.Env = append(env, "LC_ALL=C", "GIT_NO_REPLACE_OBJECTS=1")
 	if g.index != "" {
 		c.Env = append(c.Env, "GIT_INDEX_FILE="+g.index) // the last value of a name wins
 	}
@@ -46,7 +63,7 @@ func (g git) out(relay bool, args ...string) ([]byte, error) {
 
 func (g git) check() error {
 	if _, err := g.out(false, "rev-parse", "--git-dir"); err != nil {
-		return errors.New("not a git repository")
+		return fail(NotRepository, "not a git repository")
 	}
 	return nil
 }
@@ -61,29 +78,38 @@ var diffFlags = []string{"-c", "core.quotePath=false", "diff-tree", "-r", "-p", 
 // first parent or, for a root commit, the empty tree. revs is split on
 // spaces, tabs and newlines, as the shell splits it.
 func (s *Scan) Range(repo, revs string) error {
-	g := git{dir: repo, stderr: s.GitStderr}
+	return s.RevList(repo, strings.FieldsFunc(revs, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n'
+	}))
+}
+
+// RevList scans the commits "git rev-list --reverse ARGS" lists, as Range
+// does. The caller has checked args: each is handed to rev-list as given.
+func (s *Scan) RevList(repo string, args []string) error {
+	g := git{dir: repo, stderr: s.GitStderr, ctx: s.Ctx, noGit: s.Sink != nil}
 	if err := g.check(); err != nil {
 		return err
 	}
-	args := append([]string{"rev-list", "--reverse"}, strings.FieldsFunc(revs, func(r rune) bool {
-		return r == ' ' || r == '\t' || r == '\n'
-	})...)
-	c := g.cmd(args...)
+	c := g.cmd(append([]string{"rev-list", "--reverse"}, args...)...)
 	c.Stdin = s.GitStdin // for rev-list's own --stdin; the other calls never read it
 	list, err := c.Output()
+	if s.stopped() {
+		return fail(Interrupted, "interrupted")
+	}
 	if err != nil {
-		return errors.New("bad --range")
+		return fail(BadRange, "bad --range")
 	}
 	for _, sha := range lines(list) {
-		short := sha
-		if len(short) > 12 {
-			short = short[:12]
+		if s.stopped() {
+			return fail(Interrupted, "interrupted")
 		}
+		short := short(sha)
 		obj, err := g.out(true, "cat-file", "commit", sha)
 		if err != nil {
-			return errors.New("cannot read commit " + short)
+			return &Error{Kind: CommitUnreadable, Commit: sha, text: "cannot read commit " + short}
 		}
-		s.commit(short+":(commit)", obj)
+		s.Counts.Commits++
+		s.commit(sha, obj)
 		if err := s.flush(); err != nil {
 			return err
 		}
@@ -93,9 +119,9 @@ func (s *Scan) Range(repo, revs string) error {
 		}
 		diff, err := g.out(true, slices.Concat(diffFlags, against)...)
 		if err != nil {
-			return errors.New("cannot diff commit " + short)
+			return &Error{Kind: DiffFailed, Commit: sha, text: "cannot diff commit " + short}
 		}
-		s.diff(short, diff)
+		s.diff(sha, diff)
 		if err := s.flush(); err != nil {
 			return err
 		}
@@ -106,7 +132,8 @@ func (s *Scan) Range(repo, revs string) error {
 // commit scans a raw commit object. Only the author and committer header
 // lines are text; the rest of the header is hashes and signatures. Each line
 // carries its part (ADR-002 section 5.1).
-func (s *Scan) commit(where string, obj []byte) {
+func (s *Scan) commit(sha string, obj []byte) {
+	at := Finding{Loc: InCommit, Commit: sha}
 	body := false
 	for i, line := range lines(obj) {
 		ctx := rule.Context{Source: rule.Object}
@@ -123,19 +150,21 @@ func (s *Scan) commit(where string, obj []byte) {
 		default:
 			continue
 		}
-		s.emit(where, i+1, line, ctx)
+		at.Part = ctx.Part
+		s.emit(at, i+1, line, ctx)
 	}
 }
 
 // diff scans diff-tree output: each path not deleted, and each added line,
 // numbered in the new file. Deleted lines are not findings.
-func (s *Scan) diff(short string, data []byte) {
-	var file, path string
+func (s *Scan) diff(sha string, data []byte) {
+	var at Finding
 	var pending, inHunk bool
 	ln := 0
 	flush := func() {
 		if pending {
-			s.path(file, path)
+			s.Counts.Files++
+			s.path(at)
 		}
 		pending = false
 	}
@@ -145,19 +174,18 @@ func (s *Scan) diff(short string, data []byte) {
 			flush()
 			// "a/P b/P", or quoted as "\"a/P\" \"b/P\"": both halves are equal.
 			rest := line[len("diff --git "):]
+			path := substr(rest, 3, (len(rest)-5)/2)
 			if strings.HasPrefix(rest, `"`) {
 				path = substr(rest, 4, (len(rest)-9)/2)
-			} else {
-				path = substr(rest, 3, (len(rest)-5)/2)
 			}
-			file = short + ":" + s.redact(path)
+			at = Finding{Loc: InDiff, Commit: sha, Path: path}
 			pending, inHunk = true, false
 		case strings.HasPrefix(line, "@@ "):
 			flush()
 			inHunk, ln = true, hunkStart(line)
 		case inHunk:
 			if strings.HasPrefix(line, "+") {
-				s.emit(file, ln, line[1:], fileContext(path))
+				s.emit(at, ln, line[1:], fileContext(at.Path))
 				ln++
 			}
 		case strings.HasPrefix(line, "deleted file mode "):
@@ -165,7 +193,7 @@ func (s *Scan) diff(short string, data []byte) {
 		case len(line) >= 20 && strings.HasPrefix(line, "Binary files ") && strings.HasSuffix(line, " differ") &&
 			!strings.HasSuffix(line, " and /dev/null differ"):
 			flush()
-			s.Out.Finding(file, 0, "binary-unscanned")
+			s.unscanned(at, "binary-unscanned")
 		}
 	}
 	flush()
@@ -206,13 +234,14 @@ func hunkStart(line string) int {
 // read like a tree scan's: rules match and redact the raw path, which then
 // prints with git's escapes. The interim has no index target, so no flag
 // reaches this yet (HSH-5/D6). Every git call gets s.IndexFile, when set, as
-// GIT_INDEX_FILE (HSH-9/D5).
+// GIT_INDEX_FILE (HSH-9/D5). With Sink set, that is the only index git is
+// given (HSH-11/D31).
 func (s *Scan) Index(repo string) error {
-	g := git{dir: repo, stderr: s.GitStderr, index: s.IndexFile}
+	g := git{dir: repo, stderr: s.GitStderr, index: s.IndexFile, ctx: s.Ctx, noGit: s.Sink != nil}
 	if err := g.check(); err != nil {
 		return err
 	}
-	bad := errors.New("cannot read the index")
+	bad := fail(IndexUnreadable, "cannot read the index")
 	// The repository's configuration runs no fsmonitor program, and nothing
 	// is fetched from a promisor remote, so a blob that is not local reads
 	// as "missing" and fails the scan (HSH-5/D6).
@@ -247,11 +276,17 @@ func (s *Scan) Index(repo string) error {
 	}
 	r := bufio.NewReader(pipe)
 	for _, e := range entries {
-		where := escape(s.redact(e.path))
-		s.path(where, e.path)
+		if s.stopped() {
+			c.Process.Kill()
+			c.Wait()
+			return fail(Interrupted, "interrupted")
+		}
+		at := Finding{Loc: InIndex, Path: e.path}
+		s.path(at)
 		if e.mode == "160000" {
 			continue
 		}
+		s.Counts.Files++
 		data, err := readObject(r)
 		if err != nil {
 			c.Process.Kill() // cat-file would block on the output left unread
@@ -259,9 +294,9 @@ func (s *Scan) Index(repo string) error {
 			return bad
 		}
 		if bytes.IndexByte(data, 0) >= 0 {
-			s.Out.Finding(where, 0, "binary-unscanned")
+			s.unscanned(at, "binary-unscanned")
 		} else {
-			s.text(where, data, fileContext(e.path)) // a symlink's blob is its target text
+			s.text(at, data, fileContext(e.path)) // a symlink's blob is its target text
 		}
 	}
 	if c.Wait() != nil {

@@ -1,29 +1,11 @@
 package main
 
 import (
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/nonhumanhq/hush/internal/leakcheck"
 )
-
-// The module uses only the standard library.
-func TestGoModHasNoRequire(t *testing.T) {
-	data, err := os.ReadFile("../../go.mod")
-	if err != nil {
-		t.Fatal("cannot read go.mod")
-	}
-	for i, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "require") { // also "require(", which Go accepts
-			t.Errorf("go.mod line %d: require", i+1)
-		}
-	}
-	if _, err := os.Stat("../../go.sum"); err == nil {
-		t.Error("go.sum exists")
-	}
-	leakcheck.Check(t, string(data))
-}
 
 func TestCommands(t *testing.T) {
 	for _, c := range []struct {

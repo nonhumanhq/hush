@@ -2,7 +2,6 @@ package target
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -11,28 +10,47 @@ import (
 	"strings"
 )
 
-// Paths scans each path argument in turn, as found from the repository root.
-// A directory is walked, skipping .git; anything else is scanned as one file.
-func (s *Scan) Paths(paths []string) error {
+// Paths scans each path argument in turn, as found from the current
+// directory. A directory is walked, skipping .git; anything else is scanned
+// as one file.
+func (s *Scan) Paths(paths []string) error { return s.Tree("", paths) }
+
+// Tree scans each path argument in turn, as Paths does, but opens a relative
+// path argument below root, or below the current directory when root is "".
+// A finding's path is the path argument as given, followed by the part below
+// it, normalized; so with root set, a relative argument gives a path relative
+// to root.
+func (s *Scan) Tree(root string, paths []string) error {
 	for n, p := range paths {
-		if strings.HasPrefix(p, "-") {
+		if s.stopped() {
+			return fail(Interrupted, "interrupted")
+		}
+		open := p
+		switch {
+		case root != "" && !filepath.IsAbs(p):
+			open = root + "/" + p
+		case strings.HasPrefix(p, "-"):
 			p = "./" + p
+			open = p
 		}
-		fi, err := os.Lstat(p)
+		fi, err := os.Lstat(open)
 		if err != nil {
-			return fmt.Errorf("path argument %d does not exist", n+1)
+			return &Error{Kind: PathMissing, Arg: n + 1, text: fmt.Sprintf("path argument %d does not exist", n+1)}
 		}
-		if err := s.inside(p); err != nil {
+		if err := s.inside(open, n+1); err != nil {
 			return err
 		}
-		list := []string{p}
+		list := []string{open}
 		if fi.IsDir() {
-			if list, err = walk(p); err != nil {
-				return fmt.Errorf("cannot walk path argument %d", n+1)
+			if list, err = walk(open); err != nil {
+				return &Error{Kind: PathUnwalkable, Arg: n + 1, text: fmt.Sprintf("cannot walk path argument %d", n+1)}
 			}
 		}
 		for _, f := range list {
-			if err := s.file(f); err != nil {
+			if s.stopped() {
+				return fail(Interrupted, "interrupted")
+			}
+			if err := s.file(f, p+strings.TrimPrefix(f, open)); err != nil {
 				return err
 			}
 		}
@@ -40,17 +58,17 @@ func (s *Scan) Paths(paths []string) error {
 	return nil
 }
 
-// file scans one file: its path, then its lines. A symlink is scanned as its
-// target text, without following it.
-func (s *Scan) file(p string) error {
-	data, flag := read(p)
-	path := normalize(p)
-	where := s.redact(path)
-	s.path(where, path)
+// file scans the file at open, reported as name: its path, then its lines. A
+// symlink is scanned as its target text, without following it.
+func (s *Scan) file(open, name string) error {
+	data, flag := read(open)
+	at := Finding{Loc: InTree, Path: normalize(name)}
+	s.Counts.Files++
+	s.path(at)
 	if flag != "" {
-		s.Out.Finding(where, 0, flag)
+		s.unscanned(at, flag)
 	} else {
-		s.text(where, data, fileContext(path))
+		s.text(at, data, fileContext(at.Path))
 	}
 	return s.flush()
 }
@@ -126,18 +144,18 @@ func walkDir(dir string, found *[]string) error {
 	return nil
 }
 
-// inside refuses a path argument that holds the term file.
-func (s *Scan) inside(p string) error {
+// inside refuses a path argument, the arg-th, that holds the term file.
+func (s *Scan) inside(p string, arg int) error {
 	if s.Terms == "" {
 		return nil
 	}
 	t, err1 := abspath(s.Terms)
 	a, err2 := abspath(p)
 	if err1 != nil || err2 != nil {
-		return errors.New("cannot resolve a path argument")
+		return &Error{Kind: PathUnresolved, Arg: arg, text: "cannot resolve a path argument"}
 	}
 	if t == a || strings.HasPrefix(t, strings.TrimSuffix(a, "/")+"/") {
-		return errors.New("the term file is inside a scanned path; keep term files outside repositories")
+		return &Error{Kind: TermFileInside, Arg: arg, text: "the term file is inside a scanned path; keep term files outside repositories"}
 	}
 	return nil
 }

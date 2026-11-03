@@ -28,5 +28,9 @@ hush hooks install                              # pre-commit, commit-msg and pre
 hush gh -- pr create -t TITLE -F body.md        # scan what gh would post, then run gh
 ```
 
-Exit status: 0 clean, 1 findings, 2 usage or configuration error. The public Go package,
-destinations and machine-readable output arrive with v0.1 (ADR-001, ADR-002).
+Exit status: 0 clean, 1 findings, 2 usage or configuration error.
+
+The public Go package, `github.com/nonhumanhq/hush` at the module root, is in progress for
+v0.1 (ADR-001 section 7): destinations, the term-file checks, path redaction and typed errors.
+`go doc github.com/nonhumanhq/hush` describes it, with runnable examples. The command line
+moves onto it, with destinations and machine-readable output, before v0.1 (ADR-001, ADR-002).
