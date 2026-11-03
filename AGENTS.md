@@ -66,7 +66,8 @@ the move from `reference/interim-hush/`.
 - Go, standard library only: `go.mod` has no `require` lines, and a test fails if one appears.
 - `go vet ./...` and `go test ./...`. The comparison test in `cmd/hush` builds hush, runs
   it and `sh reference/interim-hush/hush-interim` over the same synthetic fixtures, and
-  needs `git`, `sh`, `awk` and `find`. Without network access, set
+  needs `git`, `sh`, `awk` and `find`. It skips where `reference/` is absent, as in the
+  public repository. Without network access, set
   `GOTOOLCHAIN=local GOPROXY=off`.
 - `go run ./cmd/hush scan --destination public --generic-only .` scans the tree with the generic tier.
 

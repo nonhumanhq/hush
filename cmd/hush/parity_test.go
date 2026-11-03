@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,6 +44,13 @@ func newParity(t *testing.T) *parity {
 	}
 	interim, err := filepath.Abs("../../reference/interim-hush/hush-interim")
 	if err != nil {
+		t.Fatal(err)
+	}
+	// The interim scanner lives in staging's reference pack, which the public
+	// repository does not hold; there is nothing to compare with (HSH-25/D1).
+	if _, err := os.Stat(interim); errors.Is(err, fs.ErrNotExist) {
+		t.Skip("no interim scanner at reference/interim-hush to compare with")
+	} else if err != nil {
 		t.Fatal(err)
 	}
 	p := &parity{t: t, interim: interim, root: t.TempDir()}
