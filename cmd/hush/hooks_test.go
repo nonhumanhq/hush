@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -569,8 +570,16 @@ func TestHooksTerms(t *testing.T) {
 	}
 	code, out = h.run(repo, nil, h.hush, "hooks", "install", "--terms", "../terms.txt") // made absolute
 	h.expect("install --terms", code, out, 0, installed)
+	// The same file may be spelled through a symlink, as darwin's temporary
+	// directory is (/var to /private/var), so either spelling is the term
+	// file's absolute path (HSH-26/D1).
+	spellings := []string{terms}
+	if r, err := filepath.EvalSymlinks(terms); err == nil && r != terms {
+		spellings = append(spellings, r)
+	}
 	for _, name := range hooks.Names {
-		if !strings.Contains(h.read(filepath.Join(repo, ".git", "hooks", name)), " --terms '"+terms+"'") {
+		script := h.read(filepath.Join(repo, ".git", "hooks", name))
+		if !slices.ContainsFunc(spellings, func(p string) bool { return strings.Contains(script, " --terms '"+p+"'") }) {
 			t.Errorf("%s does not pass the term file's absolute path", name)
 		}
 	}

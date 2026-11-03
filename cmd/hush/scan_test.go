@@ -473,12 +473,18 @@ func TestLimitCore(t *testing.T) {
 	}
 	r.Close()
 	defer c.Process.Kill()
+	// /proc reports the executable with symlinks resolved, as a symlinked
+	// TMPDIR makes them (HSH-26/D1).
+	bin := h.hush
+	if r, err := filepath.EvalSymlinks(bin); err == nil {
+		bin = r
+	}
 	limits := filepath.Join("/proc", strconv.Itoa(c.Process.Pid), "limits")
 	exe := filepath.Join("/proc", strconv.Itoa(c.Process.Pid), "exe")
 	core := regexp.MustCompile(`(?m)^Max core file size +(\S+)`)
 	var last string
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		if target, err := os.Readlink(exe); err != nil || target != h.hush {
+		if target, err := os.Readlink(exe); err != nil || target != bin {
 			continue // still the shell
 		}
 		b, err := os.ReadFile(limits)

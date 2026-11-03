@@ -2,7 +2,9 @@ package target
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -175,7 +177,16 @@ func TestNegative9IDPrefixAndReference(t *testing.T) {
 		write(t, dir, "reference/"+fleet+".md", "clean\n")
 		write(t, dir, "docs/reference/a.md", fleet+"\n")
 		write(t, dir, "Reference/a.md", fleet+"\n")
-		flagged := "Reference/a.md:1: id-prefix\ndocs/reference/a.md:1: id-prefix\n"
+		// On a file system that ignores case, as darwin's does by default,
+		// Reference/ is reference/, and the file there is exempt (HSH-26/D3).
+		lower, errLower := os.Stat(filepath.Join(dir, "reference"))
+		upper, errUpper := os.Stat(filepath.Join(dir, "Reference"))
+		folded := errLower == nil && errUpper == nil && os.SameFile(lower, upper)
+		upperRow := "Reference/a.md:1: id-prefix\n"
+		if folded {
+			upperRow = ""
+		}
+		flagged := upperRow + "docs/reference/a.md:1: id-prefix\n"
 		run("tree", func(s *Scan) error { return s.Paths([]string{"."}) }, flagged)
 		git("add", "-A")
 		run("index", func(s *Scan) error { return s.Index("") }, flagged)
@@ -184,7 +195,7 @@ func TestNegative9IDPrefixAndReference(t *testing.T) {
 		git("add", "-A")
 		c2 := commit(t, git, "HSH-11: quote "+fleet)
 		run("range", func(s *Scan) error { return s.Range("", head) },
-			c1+":Reference/a.md:1: id-prefix\n"+c1+":docs/reference/a.md:1: id-prefix\n"+c2+":(commit):6: id-prefix\n")
+			prefixed(c1, upperRow)+c1+":docs/reference/a.md:1: id-prefix\n"+c2+":(commit):6: id-prefix\n")
 		run("stdin", func(s *Scan) error { return s.Stdin(strings.NewReader(fleet+"\n"), "reference/notes.md") },
 			"reference/notes.md:1: id-prefix\n")
 		run("tree from the root, docs", func(s *Scan) error { return s.Paths([]string{"docs"}) }, "docs/reference/a.md:1: id-prefix\n")
@@ -254,4 +265,12 @@ func TestNegative8Paths(t *testing.T) {
 		t.Errorf("error %v, output %q", err, out.String())
 	}
 	lc.Check(t, out.String(), fmt.Sprint(err))
+}
+
+// prefixed puts a commit's id before a finding line, or gives "" for none.
+func prefixed(commit, line string) string {
+	if line == "" {
+		return ""
+	}
+	return commit + ":" + line
 }

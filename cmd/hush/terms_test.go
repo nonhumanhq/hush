@@ -21,8 +21,11 @@ func scanWithTerms(t *testing.T, file string) (int, string, string) {
 	if err := os.WriteFile(terms, []byte(file), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Scan the tree by a relative path, so no temporary directory name, such
+	// as darwin's random ones, can hold a test term (HSH-26/D2).
+	t.Chdir(tree)
 	var out, errs strings.Builder
-	code := run([]string{"scan", "--destination", "public", "--terms", terms, tree}, strings.NewReader(""), &out, &errs)
+	code := run([]string{"scan", "--destination", "public", "--terms", terms, "."}, strings.NewReader(""), &out, &errs)
 	lc.Check(t, out.String(), errs.String())
 	return code, out.String(), errs.String()
 }
