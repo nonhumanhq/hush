@@ -160,7 +160,7 @@ parse:
 	case hasLabel && !useStdin:
 		return fail("--label works only with --stdin")
 	}
-	s := &target.Scan{Rules: rule.List{rule.IDPrefix{}}, Out: out, Terms: terms, GitStderr: stderr, GitStdin: stdin}
+	s := &target.Scan{Rules: rule.Registry(nil), Out: out, Terms: terms, GitStderr: stderr, GitStdin: stdin}
 	if terms != "" {
 		sets, err := loadTerms(terms)
 		if err != nil {

@@ -72,7 +72,7 @@ is a port of `reference/interim-hush/` at parity, and everything is internal.
 | --- | --- |
 | `cmd/hush` | `hush scan` (the interim scanner's arguments), `hush --help`, `hush version` |
 | `internal/target` | Tree, standard input, git range and git index targets; the only package that runs git or opens scanned files |
-| `internal/rule` | The `Rule` interface, the ID-prefix rule, and the checks and path redaction a rule list gives |
+| `internal/rule` | The `Rule` interface, the `id-prefix`, `ip-address` and `email-address` rules and their registry, and the checks and path redaction a rule list gives |
 | `internal/termset` | The term-file parser and matcher; takes bytes, never a path |
 | `internal/output` | The plain finding line and the error line |
 | `internal/leakcheck` | Synthetic terms and tokens, and the leak check every test uses |
