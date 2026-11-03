@@ -53,3 +53,32 @@ Everything in this repository may become public. Therefore:
 - Each ADR states context, decision, alternatives considered, consequences, negative tests
   and open questions for the human. Keep decisions the human must make in an
   "Open before acceptance" table; never decide them yourself.
+
+# hush: repo-specific
+
+hush keeps private names out of public records. Until ADR-001 and ADR-002 are accepted it
+is a port of `reference/interim-hush/` at parity, and everything is internal.
+
+## Build and test
+- Go, standard library only: `go.mod` has no `require` lines, and a test fails if one appears.
+- `go vet ./...` and `go test ./...`. The comparison test in `cmd/hush` builds hush, runs
+  it and `sh reference/interim-hush/hush-interim` over the same synthetic fixtures, and
+  needs `git`, `sh`, `awk` and `find`. Without network access, set
+  `GOTOOLCHAIN=local GOPROXY=off`.
+- `go run ./cmd/hush scan .` scans the tree with the generic tier.
+
+## Packages
+| Package | Holds |
+| --- | --- |
+| `cmd/hush` | `hush scan` (the interim scanner's arguments), `hush --help`, `hush version` |
+| `internal/target` | Tree, standard input, git range and git index targets; the only package that runs git or opens scanned files |
+| `internal/rule` | The `Rule` interface, the ID-prefix rule, and the checks and path redaction a rule list gives |
+| `internal/termset` | The term-file parser and matcher; takes bytes, never a path |
+| `internal/output` | The plain finding line and the error line |
+| `internal/leakcheck` | Synthetic terms and tokens, and the leak check every test uses |
+
+## Tests
+- Every test passes what it prints and every error it gets through `leakcheck.Check`.
+- Synthetic strings come from `internal/leakcheck`, assembled at run time, so sources scan clean.
+- A change to scanning behaviour keeps `TestParity` passing, or lists the intended difference
+  in the PR.
