@@ -1,7 +1,7 @@
 ---
 kind: decision
 status: accepted
-verified: 2026-10-24
+verified: 2026-10-25
 supersedes: []
 ---
 
@@ -221,7 +221,7 @@ A term file that group or others can read or write is refused, not warned about.
 **Unknown rules and sets.** Any input that names a rule or a set fails with exit 2 when hush does not know the name (`unknown-rule`, `unknown-set`).
 - **In v0.1** no option selects rules or sets. The condition can arise only inside the term file, if ADR-002's syntax lets one entry refer to a set or a rule.
 - **Later inputs** that name rules or sets, such as rule selection and suppressions, must fail the same way.
-- **Output check.** Separately, before each finding is written, an output check confirms its rule is in the registry or is a loaded set. If not, the run stops with exit 2 and the fixed `internal` message.
+- **Output check.** Separately, before each finding is written, an output check confirms its rule is in the registry, is a loaded set, or is one of the two unscanned names, `binary-unscanned` and `unreadable` (section 6.1). If not, the run stops with exit 2 and the fixed `internal` message.
 
 **Trees and files:**
 
@@ -392,7 +392,7 @@ issue-body:1: id-prefix
 | `findings` | Present, as an array, for `clean` (empty) and `findings` (not empty) |
 | `error` | Present only for `error`: `{code, message, argument?, line?, commit?}`. `code` comes from the table in section 7, `message` is the stderr line without `hush: `, `argument` is a 1-based position, `line` a term-file line and `commit` a full object id |
 
-The schema sketch below uses JSON Schema draft 2020-12 and is abbreviated. It describes what readers may rely on. hush's own tests check its output against a closed variant of the same schema, one that refuses unknown fields. The set-name pattern is the interim's grammar, pending ADR-002.
+The schema sketch below uses JSON Schema draft 2020-12 and is abbreviated. It describes what readers may rely on. hush's own tests check its output against a closed variant of the same schema, one that refuses unknown fields. The set-name pattern is ADR-002's grammar, 1 to 64 characters from `[A-Za-z0-9_.-]`, both in `sets` and in the `set:` branch of a finding's `rule`.
 
 ```json
 {"type": "object",
@@ -405,7 +405,7 @@ The schema sketch below uses JSON Schema draft 2020-12 and is abbreviated. It de
   "destination": {"enum": ["public", "client", "private"]},
   "coverage": {"enum": ["complete", "generic-only"]},
   "tiers": {"type": "array", "uniqueItems": true, "items": {"enum": ["generic", "private"]}},
-  "sets": {"type": "array", "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$"}},
+  "sets": {"type": "array", "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$"}},
   "target": {"enum": ["tree", "index", "stdin", "range"]},
   "scanned": {"type": "object", "required": ["files", "commits", "lines"], "properties": {
    "files": {"type": "integer", "minimum": 0},
@@ -430,7 +430,7 @@ The schema sketch below uses JSON Schema draft 2020-12 and is abbreviated. It de
   "properties": {
    "kind": {"enum": ["match", "unscanned"]},
    "tier": {"enum": ["generic", "private"]},
-   "rule": {"type": "string", "pattern": "^([a-z0-9]+(-[a-z0-9]+)*|set:[A-Za-z0-9_.-]+)$"},
+   "rule": {"type": "string", "pattern": "^([a-z0-9]+(-[a-z0-9]+)*|set:[A-Za-z0-9_.-]{1,64})$"},
    "in_path": {"const": true},
    "commit": {"type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"},
    "tag": {"type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"},
@@ -983,6 +983,10 @@ The human accepted this ADR on 2026-10-24 and took the recommended option for ea
 | 6 | Whether the `private` destination runs the generic tier | Yes | 2026-10-24 | Section 4; test 9 |
 | 7 | What an agent sees when the private tier fails | The redacted location and the set name, relayed by the human. A second private-tier failure on the same unit blocks the unit for the human, and the agent does not retry. When the private tier cannot run at all (a term-file error), the agent is told nothing | 2026-10-24 | Sections 3 and 8 |
 | 8 | Whether hush refuses a term file that is readable or writable by group or others | Yes: exit 2 | 2026-10-24 | Sections 5 and 7; Consequences; test 20 |
+
+**Amended on 2026-10-25,** with ADR-002's acceptance (PR #10, ADR-002's decided item 7). The amendment records the two places where ADR-002 extends this ADR's text, and changes none of the decisions above:
+- **Section 6.3's schema** takes ADR-002's set-name grammar, 1 to 64 characters from `[A-Za-z0-9_.-]`, in `sets` and in the `set:` branch of a finding's `rule`. It had the interim's grammar, pending ADR-002.
+- **Section 5's output check** also accepts the two unscanned names of section 6.1, `binary-unscanned` and `unreadable`, which ADR-002 keeps out of its rule registry.
 
 ## Open questions for the human
 
