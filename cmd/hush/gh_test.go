@@ -17,11 +17,11 @@ func TestGHArguments(t *testing.T) {
 		out, error string
 	}{
 		{[]string{"gh", "--help"}, 0, ghUsage, ""},
-		{[]string{"gh"}, 2, "", "hush-interim: gh takes -- GH-ARGUMENTS (see hush gh --help)\n"},
-		{[]string{"gh", "issue", "create"}, 2, "", "hush-interim: gh takes -- GH-ARGUMENTS (see hush gh --help)\n"},
-		{[]string{"gh", "--terms", "t", "--", "issue"}, 2, "", "hush-interim: gh takes -- GH-ARGUMENTS (see hush gh --help)\n"}, // HSH-9/D4
-		{[]string{"gh", "--"}, 2, "", "hush-interim: give a gh command after -- (see hush gh --help)\n"},
-		{[]string{"gh", "--", "gist", "create", lc.Bad}, 2, "", "hush-interim: gh gist create is not covered by hush gh (see hush gh --help)\n"},
+		{[]string{"gh"}, 2, "", "hush: gh takes -- GH-ARGUMENTS (see hush gh --help)\n"},
+		{[]string{"gh", "issue", "create"}, 2, "", "hush: gh takes -- GH-ARGUMENTS (see hush gh --help)\n"},
+		{[]string{"gh", "--terms", "t", "--", "issue"}, 2, "", "hush: gh takes -- GH-ARGUMENTS (see hush gh --help)\n"}, // HSH-9/D4
+		{[]string{"gh", "--"}, 2, "", "hush: give a gh command after -- (see hush gh --help)\n"},
+		{[]string{"gh", "--", "gist", "create", lc.Bad}, 2, "", "hush: gh gist create is not covered by hush gh (see hush gh --help)\n"},
 	} {
 		var out, errs strings.Builder
 		code := run(c.args, strings.NewReader(""), &out, &errs)
@@ -60,7 +60,7 @@ func TestGHCommand(t *testing.T) {
 	code, out = h.run(h.root, path, h.hush, "gh", "--", "pr", "comment", "3", "-b", "see "+lc.Bad)
 	h.expect("token", code, out, 1, "--body:1: id-prefix\n")
 	code, out = h.run(h.root, path, h.hush, "gh", "--", "pr", "create", "--web")
-	h.expect("browser flow", code, out, 2, "hush-interim: gh pr create --web is not covered by hush gh (see hush gh --help)\n")
+	h.expect("browser flow", code, out, 2, "hush: gh pr create --web is not covered by hush gh (see hush gh --help)\n")
 	if got := ghRan(); got != "" {
 		t.Errorf("gh ran after a finding or a refusal: %q", got)
 	}

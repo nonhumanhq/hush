@@ -1,234 +1,328 @@
-// Command hush keeps private names out of public records. It is pre-release:
-// "hush scan" takes the interim scanner's arguments and gives its output.
+// Command hush keeps private names out of public records. "hush scan" scans
+// files, the git index, git ranges or standard input for one destination
+// (ADR-001 section 7), "hush hooks" installs git hooks that run it, and
+// "hush gh" scans what a gh command would post before it runs gh.
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
 	"os/signal"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 
+	"github.com/nonhumanhq/hush"
 	"github.com/nonhumanhq/hush/internal/output"
 	"github.com/nonhumanhq/hush/internal/rule"
-	"github.com/nonhumanhq/hush/internal/target"
-	"github.com/nonhumanhq/hush/internal/termset"
 )
 
-const usage = `usage: hush scan [--terms FILE] PATH...
-       hush scan [--terms FILE] [-C DIR] --range REVS
-       hush scan [--terms FILE] [--label NAME] --stdin
-       hush hooks install [--force] [--terms FILE] | uninstall
-       hush hooks pre-commit [--terms FILE]
+const usage = `usage: hush scan --destination DEST [--terms FILE | --generic-only]
+                 [--identities ADDR[,ADDR...]] [--format plain|json] TARGET
+       hush hooks install [--force] [--terms FILE] [--identities ADDR[,ADDR...]]
+       hush hooks uninstall
        hush gh -- GH-ARGUMENTS
        hush version
 
-hush keeps private names out of public records. It is pre-release: "hush scan"
-takes the interim scanner's arguments and gives its output, and "hush scan
---help" describes them. "hush hooks" installs git hooks that scan commits and
-pushes, and "hush hooks pre-commit" is the command the installed pre-commit
-hook runs. "hush gh" scans the text a gh command would post before it runs gh.
+hush keeps private names out of public records. "hush scan" scans files, the
+git index, git ranges or standard input for one destination, and "hush scan
+--help" describes it. "hush hooks" installs git hooks that scan commits and
+pushes. "hush gh" scans the text a gh command would post before it runs gh.
 "hush hooks --help" and "hush gh --help" describe them. "hush version" prints
 the version.
 `
 
-const scanUsage = `usage: hush scan [--terms FILE] PATH...
-       hush scan [--terms FILE] [-C DIR] --range REVS
-       hush scan [--terms FILE] [--label NAME] --stdin
+// scanUsage returns "hush scan --help", with the rules named from the
+// registry (HSH-11/D26). It prints no flagged token and no address.
+func scanUsage() string {
+	var names []string
+	for _, r := range genericRules() {
+		names = append(names, r.Name())
+	}
+	return `usage: hush scan --destination DEST [--terms FILE | --generic-only]
+                 [--identities ADDR[,ADDR...]] [--format plain|json] TARGET
 
-  PATH...       files or directories, as seen from the repository root;
-                directories are walked and .git is skipped
-  --range REVS  git rev-list arguments separated by spaces ("main..HEAD",
-                "HEAD --not --remotes"); scans the lines each commit adds,
-                the paths it touches, and its author, committer and message
-  -C DIR        the repository for --range (default: current directory)
-  --stdin, -    scan standard input
-  --label NAME  the name standard input gets in findings (default: <stdin>)
-  --terms FILE  also match the term sets in FILE; the scan fails unless FILE
-                exists, is readable, holds at least one term and lies outside
-                every scanned path
+  DEST    public, private or client:LABEL
+  TARGET  PATH... | --index [-C DIR] | --range REVS [-C DIR] [--allow-empty-range]
+          | [--label NAME] (--stdin | -)
 
-Findings: one per line, WHERE:LINE: RULE. RULE is id-prefix, set:NAME,
-binary-unscanned or unreadable, with " in path" when the path itself broke
-the rule. Line 0 is the path or the whole file. A path component that breaks
-a rule prints as <redacted>.
+  --destination DEST   where the scanned text may end up, required: public
+                       (anyone may read it), client:LABEL (only the client
+                       whose code is LABEL) or private (no one outside
+                       nonhumanhq)
+  --terms FILE         the term sets in FILE, the private tier; public and
+                       client destinations need it. FILE is a regular file
+                       that group and others can neither read nor write, and
+                       lies outside every scanned path
+  --generic-only       the generic rules alone; public only, never with --terms
+  --identities ADDR[,ADDR...]
+                       addresses that pass the email-address rule where they
+                       stand as an identity: an author, committer or tagger
+                       line, or a trailer
+  --format FORMAT      plain (the default) or json: one document, written once
+  PATH...              files and directories; directories are walked in byte
+                       order, .git is skipped, symlinks are scanned as their
+                       link text
+  --index              the git index: each staged path and its blob; reads
+                       GIT_INDEX_FILE when it is set
+  --range REVS         commits, oldest first: revisions, A..B, ^REV, --not and
+                       the selectors --all, --branches, --tags and --remotes,
+                       separated by spaces; each commit's author, committer,
+                       message, changed paths and added lines
+  -C DIR               the repository for --index and --range (default: the
+                       current directory)
+  --allow-empty-range  a range with no commits passes; otherwise it exits 2
+  --stdin, -           standard input
+  --label NAME         the name standard input gets in findings (default
+                       <stdin>): a letter or digit, then up to 63 letters,
+                       digits, dots, underscores or hyphens
+
+Every option comes before the first path and takes the next argument as its
+value. --help is accepted only alone.
+
+Rules: ` + strings.Join(names, ", ") + `, and set:NAME for a term set.
+
+Findings: one per line, WHERE:LINE: RULE, with " in path" when the path itself
+broke the rule. Line 0 is the path or the whole file. A path component that
+breaks a rule or cannot print safely prints as <redacted>. binary-unscanned
+and unreadable report what could not be scanned.
+
+Exit status: 0 clean, 1 findings, 2 an error, with one line on standard error.
 `
-
-func main() {
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sig
-		os.Exit(2)
-	}()
-	// A closed reader on standard output then fails the write, and scan exits
-	// 2 silently, as the interim does when awk dies of SIGPIPE. Nothing reads
-	// this channel, and git children keep the default SIGPIPE (HSH-5/D13).
-	signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
-	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
+func main() {
+	limitCore()
+	// A closed reader on standard output then fails the write, which exits
+	// 2, instead of killing hush. Nothing reads this channel, and git
+	// children keep the default SIGPIPE (HSH-5/D13).
+	signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
+	ctx, _ := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	p := &process{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr}
+	// A signal cancels the scan's context, which stops git and the walk; a
+	// read of standard input cannot be stopped, so the signal also ends the
+	// process here, with the interrupted error, unless the run has already
+	// written its result (HSH-11/D44).
+	context.AfterFunc(ctx, p.interrupt)
+	os.Exit(p.run(ctx, os.Args[1:]))
+}
+
+// limitCore sets the core-dump size limit to zero, so that a crash cannot
+// leave the terms in a core file (ADR-001 section 6.6).
+func limitCore() { setCoreLimit() }
+
+// setCoreLimit is what limitCore does. The tests replace it in their own
+// process, whose hard limit it would otherwise lower for good, so that
+// TestLimitCore can still raise the limit for the built binary it checks.
+var setCoreLimit = func() { syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{}) }
+
+// process is one run of hush: its standard streams and, once the JSON
+// document is owed, what an error writes to standard output. Its result is
+// claimed once, under mu, by fail, failError, report, text or interrupt;
+// whichever comes first wins, and later ones write nothing. The claimant
+// writes standard output after releasing mu, so that a signal can still end
+// the process while a write blocks (HSH-11/D44).
+type process struct {
+	stdin          io.Reader
+	stdout, stderr io.Writer
+
+	mu      sync.Mutex
+	ended   bool // the result is claimed
+	writing bool // the claimant is writing standard output
+	json    bool // a JSON document is owed
+	dest    hush.Destination
+	cov     hush.Coverage
+	tgt     hush.Target
+}
+
+// testHook, when a test sets it, runs in report before the result is claimed
+// (claimed false) and after (claimed true), so a test can inject a panic at
+// either point. It is nil outside tests.
+var testHook func(claimed bool)
+
 // run executes one hush command and returns its exit status: 0 clean, 1
-// findings, 2 usage or configuration error.
-func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+// findings, 2 an error. A panic is recovered into the fixed internal error,
+// whose line is written even when the result was already claimed, so a panic
+// never ends hush with standard error empty.
+func (p *process) run(ctx context.Context, args []string) (code int) {
+	defer func() {
+		if recover() != nil {
+			code = p.failError(nil)
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if p.writing { // the claimant panicked while writing its result
+				p.writing = false
+				output.Error(p.stderr, msgInternal)
+			}
+		}
+	}()
 	switch {
 	case len(args) == 0:
-		output.Error(stderr, "no command (see hush --help)")
+		return p.fail("no command (see hush --help)")
 	case args[0] == "scan":
-		return scan(args[1:], stdin, stdout, stderr)
+		return p.scanCommand(ctx, args[1:])
 	case args[0] == "hooks":
-		return hooksCommand(args[1:], stdout, stderr)
+		return p.hooksCommand(args[1:])
 	case args[0] == "gh":
-		return ghCommand(args[1:], stdin, stdout, stderr)
+		return p.ghCommand(args[1:])
+	case (args[0] == "-h" || args[0] == "--help") && len(args) == 1:
+		return p.text(usage)
 	case args[0] == "-h" || args[0] == "--help":
-		io.WriteString(stdout, usage)
-		return 0
+		return p.fail("--help is accepted only alone")
 	case args[0] != "version":
-		output.Error(stderr, "unknown command (see hush --help)")
+		return p.fail("unknown command (see hush --help)")
 	case len(args) > 1:
-		output.Error(stderr, "version takes no arguments")
-	default:
-		io.WriteString(stdout, version()+"\n")
-		return 0
+		return p.fail("version takes no arguments")
+	}
+	return p.text(version() + "\n")
+}
+
+// msgInternal is package hush's fixed internal message, which the CLI writes
+// itself only when a panic follows a claimed result.
+const msgInternal = "internal error; output withheld"
+
+// owe records that every outcome from here writes a JSON document for d, c
+// and t.
+func (p *process) owe(d hush.Destination, c hush.Coverage, t hush.Target) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.json, p.dest, p.cov, p.tgt = true, d, c, t
+}
+
+// claim marks the result as claimed and being written, and reports whether
+// this call claimed it. The caller then writes standard output without mu and
+// calls done.
+func (p *process) claim() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ended {
+		return false
+	}
+	p.ended, p.writing = true, true
+	return true
+}
+
+// done ends the claimant's write: under mu, it writes msg as the error line
+// when msg is not "", and returns code.
+func (p *process) done(code int, msg string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.writing {
+		p.writing = false
+		if msg != "" {
+			output.Error(p.stderr, msg)
+		}
+	}
+	return code
+}
+
+// text writes s to standard output and returns 0, or 2 when the write fails.
+func (p *process) text(s string) int {
+	if !p.claim() {
+		return 2
+	}
+	if _, err := io.WriteString(p.stdout, s); err != nil {
+		return p.done(2, "cannot write output")
+	}
+	return p.done(0, "")
+}
+
+// fail writes msg, one of the command line's own messages, as the one error
+// line, and returns 2. It is used only before a JSON document is owed.
+func (p *process) fail(msg string) int {
+	if p.claim() {
+		p.done(2, msg)
 	}
 	return 2
 }
 
-// scan parses the interim scanner's arguments exactly as it does, in order,
-// and runs one target.
-func scan(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	out := output.New(stdout)
-	fail := func(msg string) int {
-		if out.Flush() != nil {
-			return 2 // the interim's awk died of SIGPIPE before this (HSH-5/D13)
-		}
-		output.Error(stderr, msg)
+// failError writes err as the one error line, and as the JSON document when
+// one is owed, and returns 2. Only a *hush.Error's text is printed; any other
+// error, nil included, prints the fixed internal message (ADR-001 section
+// 6.6).
+func (p *process) failError(err error) int {
+	if p.claim() {
+		p.done(2, p.writeError(err))
+	}
+	return 2
+}
+
+// writeError writes err's JSON document when one is owed, and returns the
+// error line to write: err's message, the fixed internal message for any
+// error that is not a *hush.Error, or the output message when the document
+// cannot be written. The caller has claimed the result.
+func (p *process) writeError(err error) string {
+	var e *hush.Error
+	if !errors.As(err, &e) || e == nil {
+		err, e = nil, nil
+	}
+	msg := msgInternal
+	if e != nil {
+		msg = e.Error()
+	}
+	if p.json && hush.WriteErrorJSON(p.stdout, p.dest, p.cov, p.tgt, err) != nil {
+		msg = "cannot write output"
+	}
+	return msg
+}
+
+// report writes a scan's result: the report and exit 0 or 1, or the error
+// and exit 2. Exit 0 is reached only here, after the report is written
+// without error (ADR-001 section 5).
+func (p *process) report(rep *hush.Report, err error, json bool) int {
+	if testHook != nil {
+		testHook(false)
+	}
+	if !p.claim() {
 		return 2
 	}
-	var terms, revs, repo string
-	label, hasTerms, hasLabel, useStdin := "<stdin>", false, false, false
-	i := 0
-parse:
-	for i < len(args) {
-		a, more := args[i], i+1 < len(args)
-		switch {
-		case a == "--terms":
-			if !more {
-				return fail("--terms needs a file")
-			}
-			if hasTerms {
-				return fail("--terms given twice")
-			}
-			if terms, hasTerms = args[i+1], true; terms == "" {
-				return fail("term file missing or unreadable")
-			}
-		case a == "--range":
-			if !more || args[i+1] == "" {
-				return fail("--range needs revisions")
-			}
-			revs = args[i+1]
-		case a == "-C":
-			if !more || args[i+1] == "" {
-				return fail("-C needs a directory")
-			}
-			repo = args[i+1]
-		case a == "--label":
-			if !more {
-				return fail("--label needs a name")
-			}
-			label, hasLabel = args[i+1], true
-		case a == "--stdin" || a == "-":
-			useStdin = true
-			i++
-			continue
-		case a == "-h" || a == "--help":
-			io.WriteString(stdout, scanUsage)
-			return 0
-		case a == "--":
-			i++
-			break parse
-		case strings.HasPrefix(a, "-"):
-			return fail("unknown option " + a + " (see --help)") // the interim echoes it
-		default:
-			break parse
-		}
-		i += 2 // an option and its value
+	if testHook != nil {
+		testHook(true)
 	}
-	paths := args[i:]
-	modes := 0
-	for _, on := range []bool{useStdin, revs != "", len(paths) > 0} {
-		if on {
-			modes++
-		}
-	}
+	var findings *hush.FindingsError
 	switch {
-	case modes != 1:
-		return fail("give exactly one of PATH..., --range or --stdin (see --help)")
-	case repo != "" && revs == "":
-		return fail("-C works only with --range")
-	case hasLabel && !useStdin:
-		return fail("--label works only with --stdin")
+	case errors.As(err, &findings):
+		rep = findings.Report()
+	case err != nil:
+		return p.done(2, p.writeError(err))
 	}
-	s := &target.Scan{Rules: genericRules(), Out: out, Terms: terms, GitStderr: stderr, GitStdin: stdin}
-	if terms != "" {
-		sets, err := loadTerms(terms)
-		if err != nil {
-			return fail(err.Error())
-		}
-		s.Sets = sets
+	write := rep.WritePlain
+	if json {
+		write = rep.WriteJSON
 	}
-	var err error
+	if write(p.stdout) != nil {
+		return p.done(2, "cannot write output")
+	}
+	return p.done(hush.ExitCode(err), "")
+}
+
+// interrupt ends the process with exit 2 once a signal cancels the context.
+// Before the result is claimed, it writes the interrupted error (and the
+// JSON document when one is owed). While the claimant writes standard
+// output, which may block on a reader that never reads, it writes only the
+// interrupted line, since a document cannot follow a partial write. Once the
+// result is written, it does nothing.
+func (p *process) interrupt() {
+	p.mu.Lock()
 	switch {
-	case useStdin:
-		err = s.Stdin(stdin, label)
-	case revs != "":
-		err = s.Range(repo, revs)
+	case !p.ended:
+		p.ended = true
+		output.Error(p.stderr, p.writeError(hush.ErrInterrupted))
+	case p.writing:
+		output.Error(p.stderr, hush.ErrInterrupted.Error())
 	default:
-		err = s.Paths(paths)
+		p.mu.Unlock()
+		return
 	}
-	if err != nil {
-		return fail(err.Error())
-	}
-	if out.Flush() != nil {
-		return 2
-	}
-	if out.Found > 0 {
-		return 1
-	}
-	return 0
+	os.Exit(2)
 }
 
-// genericRules returns the generic tier, the rules every scan applies. hush
-// scan, hush hooks pre-commit and hush gh all take their list from here
-// (HSH-9/D12).
+// genericRules returns the generic tier, which hush gh applies until it scans
+// through package hush (HSH-9/D12), and which scan's help text names.
 func genericRules() rule.List { return rule.Registry(nil) }
-
-// loadTerms reads the term file named by --terms, parses it as format 1 and
-// runs ADR-002 section 1.4's load-time checks on its set names and client
-// labels: check 1, the terms, and check 2, the generic rules on the name as
-// written, as a bare string. Package hush takes these over (HSH-11/D12).
-func loadTerms(path string) (*termset.Sets, error) {
-	missing := errors.New("term file missing or unreadable")
-	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() {
-		return nil, missing
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, missing
-	}
-	sets, err := termset.Parse(data)
-	if err != nil {
-		return nil, err
-	}
-	generic := rule.Registry(nil)
-	breaks := func(name []byte) bool { return len(generic.Check(name, rule.Context{Source: rule.Text})) > 0 }
-	if err := sets.CheckNames(breaks); err != nil {
-		return nil, err
-	}
-	return sets, nil
-}
 
 // version returns "hush", the module version and, when the build records
 // one, the VCS revision.

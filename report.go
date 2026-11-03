@@ -131,16 +131,17 @@ var unscannedNames = map[string]bool{"binary-unscanned": true, "unreadable": tru
 
 // finding is the one constructor of Finding (ADR-001 section 6.6). It runs the
 // output check, that raw.Rule is a rule in the scanner's registry, a loaded
-// set or one of the two unscanned names, and redacts the path. ok is false
-// when the check fails.
+// set or one of the two unscanned names (unreadable also in path, for a path
+// that cannot print safely), and redacts the path. ok is false when the check
+// fails.
 func (s *Scanner) finding(raw target.Finding) (f Finding, ok bool) {
 	switch name, isSet := strings.CutPrefix(raw.Rule, "set:"); {
 	case isSet && s.sets != nil && s.hasSet(name):
 		f.Kind, f.Tier = Match, TierPrivate
 	case !isSet && s.hasRule(raw.Rule):
 		f.Kind, f.Tier = Match, TierGeneric
-	case !isSet && unscannedNames[raw.Rule] && !raw.InPath:
-		f.Kind = Unscanned
+	case !isSet && unscannedNames[raw.Rule] && (!raw.InPath || raw.Rule == "unreadable"):
+		f.Kind = Unscanned // unreadable in path: a path that cannot print safely
 	default:
 		return Finding{}, false
 	}
@@ -252,6 +253,7 @@ type Report struct {
 	dest     Destination
 	coverage Coverage
 	sets     []string // the sets that applied, or nil
+	target   Target
 	counts   Counts
 }
 

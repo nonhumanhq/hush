@@ -1,8 +1,6 @@
 package main
 
 import (
-	"io"
-
 	"github.com/nonhumanhq/hush/internal/ghwrap"
 	"github.com/nonhumanhq/hush/internal/output"
 	"github.com/nonhumanhq/hush/internal/target"
@@ -41,17 +39,17 @@ NUL byte, and for api, text that gh or GitHub changes after the scan:
 Exit status: 1 on findings, 2 on a refusal or an error, otherwise gh's own.
 `
 
-// ghCommand runs "hush gh -- GH-ARGUMENTS". It takes no term file until
-// HSH-11 brings ADR-001's destinations (HSH-9/D4).
-func ghCommand(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+// ghCommand runs "hush gh -- GH-ARGUMENTS". It takes no term file and still
+// scans through the internal packages until HSH-11's part e brings ADR-001's
+// grammar to it (HSH-9/D4).
+func (p *process) ghCommand(args []string) int {
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
-		io.WriteString(stdout, ghUsage)
-		return 0
+		return p.text(ghUsage)
 	}
 	if len(args) == 0 || args[0] != "--" {
-		output.Error(stderr, "gh takes -- GH-ARGUMENTS (see hush gh --help)")
-		return 2
+		return p.fail("gh takes -- GH-ARGUMENTS (see hush gh --help)")
 	}
+	stdin, stdout, stderr := p.stdin, p.stdout, p.stderr
 	out := output.New(stdout)
 	s := &target.Scan{Rules: genericRules(), Out: out, GitStderr: stderr}
 	code, err := ghwrap.Run(s, args[1:], stdin, stdout, stderr)

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -11,10 +12,12 @@ import (
 	lc "github.com/nonhumanhq/hush/internal/leakcheck"
 )
 
-// parity runs the interim scanner and hush over the same fixtures and
-// requires the same exit status, standard output and standard error
-// (HSH-5/D15). Subtests run in order: later git cases build on earlier
-// commits.
+// parity runs the interim scanner and hush over the same fixtures, with the
+// interim's arguments mapped as ADR-001's Consequences table says, and
+// requires the same exit status and standard output. Standard error is
+// checked against the message table instead: empty on exit 0 and 1, and one
+// "hush: " line from the table on exit 2 (HSH-5/D15, HSH-11/T18). Subtests run
+// in order: later git cases build on earlier commits.
 type parity struct {
 	t                *testing.T
 	interim, hush    string
@@ -24,7 +27,6 @@ type parity struct {
 	stdin            string   // for the next run only
 	extra            []string // environment for the next run only
 	stdout           *os.File // standard output for the next run only, if set
-	shellLine        bool     // for the next run only: the interim's standard error starts with a line of the shell's own
 }
 
 type result struct {
@@ -59,7 +61,7 @@ func newParity(t *testing.T) *parity {
 		"GIT_COMMITTER_NAME=alice", "GIT_COMMITTER_EMAIL=alice@example.com",
 	}
 	p.terms = filepath.Join(p.root, "terms.txt")
-	p.write(p.terms, lc.TermFile())
+	p.writeTerms(p.terms, lc.TermFile())
 	return p
 }
 
@@ -83,6 +85,15 @@ func (p *parity) write(name, content string) {
 	}
 	p.mkdir(filepath.Dir(name))
 	if err := os.WriteFile(name, []byte(content), 0o644); err != nil {
+		p.t.Fatal(err)
+	}
+}
+
+// writeTerms creates a term file at the absolute path name, at mode 0600,
+// which hush requires and the interim ignores.
+func (p *parity) writeTerms(name, content string) {
+	p.write(name, content)
+	if err := os.Chmod(name, 0o600); err != nil {
 		p.t.Fatal(err)
 	}
 }
@@ -124,18 +135,28 @@ func (p *parity) exec(name string, args ...string) result {
 	return r
 }
 
-// run is one case: both programs, the same arguments, the expected status
-// and standard output ("*" for any), and the leak check.
+// hushArgs maps the interim scanner's arguments to hush's (ADR-001,
+// Consequences): "scan --destination public", then "--terms FILE" as the
+// interim gives it or "--generic-only" without one, then the rest.
+func hushArgs(args []string) []string {
+	out := []string{"scan", "--destination", "public"}
+	if !slices.Contains(args, "--terms") {
+		out = append(out, "--generic-only")
+	}
+	return append(out, args...)
+}
+
+// run is one case: both programs, the interim's arguments and their mapping,
+// the expected status and standard output ("*" for any), standard error
+// against the table, and the leak check.
 func (p *parity) run(name string, code int, want string, args ...string) {
 	p.t.Run(name, func(t *testing.T) {
 		ref := p.exec("sh", append([]string{p.interim}, args...)...)
-		got := p.exec(p.hush, append([]string{"scan"}, args...)...)
-		if _, rest, ok := strings.Cut(ref.stderr, "\n"); p.shellLine && ok && rest != "" && rest == got.stderr {
-			ref.stderr = rest // hush does not print the shell's message (HSH-5/D9)
-		}
-		if got != ref {
+		got := p.exec(p.hush, hushArgs(args)...)
+		if got.code != ref.code || got.stdout != ref.stdout {
 			t.Errorf("hush differs from the interim scanner\nhush:    %+v\ninterim: %+v", got, ref)
 		}
+		checkStderr(t, got)
 		if want != "*" && want != "" {
 			want += "\n"
 		}
@@ -144,27 +165,53 @@ func (p *parity) run(name string, code int, want string, args ...string) {
 		}
 		lc.Check(t, ref.stdout, ref.stderr, got.stdout, got.stderr)
 	})
-	p.stdin, p.extra, p.stdout, p.shellLine = "", nil, nil, false
+	p.stdin, p.extra, p.stdout = "", nil, nil
 }
 
-// differ is a case where hush differs from the interim scanner on purpose
-// (HSH-11/D13): each program must give exactly the result listed for it.
+// differ is a case where hush differs from the interim scanner on purpose, in
+// its exit status or standard output (HSH-11/D13, D45): each program must
+// give exactly the result listed for it, hush with its arguments mapped.
 func (p *parity) differ(name string, interim, hush result, args ...string) {
 	p.t.Run(name, func(t *testing.T) {
 		ref := p.exec("sh", append([]string{p.interim}, args...)...)
-		got := p.exec(p.hush, append([]string{"scan"}, args...)...)
+		got := p.exec(p.hush, hushArgs(args)...)
+		if interim.stderr == "*" {
+			ref.stderr = "*" // it names a path of this machine
+		}
 		if ref != interim {
 			t.Errorf("the interim scanner gives %+v, want %+v", ref, interim)
 		}
 		if got != hush {
 			t.Errorf("hush gives %+v, want %+v", got, hush)
 		}
+		checkStderr(t, got)
 		lc.Check(t, ref.stdout, ref.stderr, got.stdout, got.stderr)
 	})
+	p.stdin = ""
 }
 
-// fails is the result of an error exit with one error line.
+// fails is the result of an error exit with one error line; interim is the
+// interim scanner's text.
 func fails(msg string) result { return result{2, "", "hush-interim: " + msg + "\n"} }
+
+// hushFails is hush's result for an error exit with message msg.
+func hushFails(msg string) result { return result{2, "", "hush: " + msg + "\n"} }
+
+// checkStderr fails t unless r's standard error is ADR-001 section 6.2's:
+// empty on exit 0 and 1, and on exit 2 exactly one line, "hush: " and a
+// message of the table (ADR-001, Consequences).
+func checkStderr(t *testing.T, r result) {
+	t.Helper()
+	msg, ok := strings.CutPrefix(r.stderr, "hush: ")
+	switch {
+	case r.code != 2 && r.stderr != "":
+		t.Errorf("exit %d with standard error %q", r.code, r.stderr)
+	case r.code == 2 && (!ok || strings.Count(r.stderr, "\n") != 1 || !strings.HasSuffix(msg, "\n")):
+		t.Errorf("exit 2 with standard error %q, want one hush: line", r.stderr)
+	case r.code == 2 && !inTable(strings.TrimSuffix(msg, "\n")):
+		t.Errorf("standard error %q is not from the message table", r.stderr)
+	}
+}
 
 func TestParity(t *testing.T) {
 	p := newParity(t)
@@ -231,7 +278,7 @@ func TestParity(t *testing.T) {
 	p.run("empty term file name fails", 2, "", "--terms", "", ".")
 	p.run("term file that is a directory fails", 2, "", "--terms", p.root, ".")
 	locked := filepath.Join(p.root, "locked.txt")
-	p.write(locked, lc.TermFile())
+	p.writeTerms(locked, lc.TermFile())
 	if err := os.Chmod(locked, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -241,24 +288,27 @@ func TestParity(t *testing.T) {
 		p.run("unreadable term file fails", 2, "", "--terms", locked, ".")
 	}
 	empty, nosection, badset := filepath.Join(p.root, "empty.txt"), filepath.Join(p.root, "nosection.txt"), filepath.Join(p.root, "badset.txt")
-	p.write(empty, "# nothing but comments\n\n[people]\n")
-	p.write(nosection, lc.Person+"\n[clients]\n"+lc.Client+"\n")
-	p.write(badset, "[two words]\n"+lc.Client+"\n")
-	// Intended differences: format 1 words these refusals as ADR-002 section
-	// 1.5 does, and refuses a set with no terms on its own line.
-	p.differ("term file without terms fails", fails("term file holds no terms"),
-		fails("term file: line 3: set has no terms"), "--terms", empty, ".")
-	p.differ("term outside a section fails", fails("term file: term outside a [set] section at line 1"),
-		fails("term file: line 1: term outside a set"), "--terms", nosection, ".")
-	p.differ("bad set name fails", fails("term file: bad set name at line 1"),
-		fails("term file: line 1: bad attribute"), "--terms", badset, ".")
+	p.writeTerms(empty, "# nothing but comments\n\n[people]\n")
+	p.writeTerms(nosection, lc.Person+"\n[clients]\n"+lc.Client+"\n")
+	p.writeTerms(badset, "[two words]\n"+lc.Client+"\n")
+	// Format 1 words these refusals as ADR-002 section 1.5 does, and refuses a
+	// set with no terms on its own line; the status and output are the same.
+	p.run("term file without terms fails", 2, "", "--terms", empty, ".")
+	p.run("term outside a section fails", 2, "", "--terms", nosection, ".")
+	p.run("bad set name fails", 2, "", "--terms", badset, ".")
 	// Intended differences: format 1's header attributes, which the interim
 	// refuses, and section 1.4's load-time checks, which it does not run.
 	options, refused := filepath.Join(p.root, "options.txt"), filepath.Join(p.root, "refused.txt")
-	p.write(options, "[clients match=word]\n"+lc.Client+"\n")
-	p.write(refused, "["+lc.Client+"-notes]\n"+lc.Client+"\n")
+	p.writeTerms(options, "[clients match=word]\n"+lc.Client+"\n")
+	p.writeTerms(refused, "["+lc.Client+"-notes]\n"+lc.Client+"\n")
 	p.differ("header attributes load", fails("term file: bad set name at line 1"), result{}, "--terms", options, ".")
-	p.differ("a set name holding a term is refused", result{}, fails("term file: line 1: set name refused"), "--terms", refused, ".")
+	p.differ("a set name holding a term is refused", result{}, hushFails("term file: line 1: set name refused"), "--terms", refused, ".")
+	// Intended difference: hush refuses a term file others can read, which the
+	// interim loads (ADR-001 section 5).
+	open := filepath.Join(p.root, "open.txt")
+	p.write(open, lc.TermFile())
+	p.differ("a term file others can read is refused", result{}, hushFails("term file: readable or writable by group or others"),
+		"--terms", open, ".")
 	p.run("term file given twice fails", 2, "", "--terms", p.terms, "--terms", p.terms, ".")
 
 	p.fresh()
@@ -276,7 +326,7 @@ func TestParity(t *testing.T) {
 		"--terms", p.terms, ".")
 
 	p.fresh()
-	p.write("terms.txt", lc.TermFile())
+	p.writeTerms(filepath.Join(p.dir, "terms.txt"), lc.TermFile())
 	p.run("term file inside a scanned path fails", 2, "", "--terms", "./terms.txt", ".")
 
 	p.stdin = "ask " + lc.Person + "\n"
@@ -324,9 +374,12 @@ func TestParity(t *testing.T) {
 	// Beyond the interim's 42 cases: revisions on standard input, merges, bare
 	// mirrors, the committer, a closed reader, .git, unreadable files and the
 	// help text.
+	// Intended difference: "--stdin" is a rev-list option, which hush's
+	// range text refuses (ADR-001 section 5).
 	p.dir = repo
 	p.stdin = c2 + "^.." + c2 + "\n"
-	p.run("range reads revisions from standard input", 1, c2+":docs/a.md:2: id-prefix", "--range", "--stdin")
+	p.differ("range reads revisions from standard input", result{1, c2 + ":docs/a.md:2: id-prefix\n", ""},
+		hushFails("argument 5: range: word 1 is refused"), "--range", "--stdin")
 	p.git(nil, "checkout", "-q", "-b", "side")
 	p.write("docs/side.md", "from the side: "+lc.Bad+"\n")
 	side := p.commit("HSH-5: add a side note")
@@ -369,18 +422,29 @@ func TestParity(t *testing.T) {
 	} else {
 		chmod("locked.md", 0)
 		p.run("unreadable file is reported", 1, "locked.md:0: unreadable", ".")
+		// With --terms, neither can show that the term file is not inside.
 		chmod("shut", 0o600)
-		p.shellLine = true
 		p.run("unsearchable directory with --terms fails", 2, "", "--terms", p.terms, "shut")
+		p.run("unsearchable directory is reported", 1, "locked.md:0: unreadable\nshut/a.md:0: unreadable", ".")
+		// Intended difference: hush reports a directory it cannot read and
+		// scans the rest, where the interim's find fails (ADR-001 section 5).
+		chmod("shut", 0)
+		p.differ("unreadable directory is reported", result{2, "", "*"},
+			result{1, "locked.md:0: unreadable\nshut:0: unreadable\n", ""}, ".")
 		chmod("shut", 0o755)
 	}
 
-	t.Run("help is the interim's with the command name", func(t *testing.T) {
-		ref, got := p.exec("sh", p.interim, "--help"), p.exec(p.hush, "scan", "--help")
-		ref.stdout = strings.ReplaceAll(ref.stdout, "hush-interim", "hush scan")
-		if got != ref || got.code != 0 {
-			t.Errorf("help differs:\nhush:    %+v\ninterim: %+v", got, ref)
+	// "hush scan --help" is hush's own (HSH-11/D26), exits 0 only alone,
+	// and prints no flagged token.
+	t.Run("help", func(t *testing.T) {
+		got := p.exec(p.hush, "scan", "--help")
+		if got.code != 0 || !strings.HasPrefix(got.stdout, "usage: hush scan --destination DEST") || got.stderr != "" {
+			t.Errorf("help: %+v", got)
 		}
 		lc.Check(t, got.stdout, got.stderr)
+		got = p.exec(p.hush, "scan", "--terms", p.terms, "--help", ".")
+		if got != hushFails("argument 3: --help is accepted only alone") {
+			t.Errorf("help with other arguments: %+v", got)
+		}
 	})
 }

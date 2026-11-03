@@ -9,89 +9,90 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/nonhumanhq/hush"
 	"github.com/nonhumanhq/hush/internal/hooks"
 	"github.com/nonhumanhq/hush/internal/output"
 	"github.com/nonhumanhq/hush/internal/target"
 )
 
-const hooksUsage = `usage: hush hooks install [--force] [--terms FILE]
+const hooksUsage = `usage: hush hooks install [--force] [--terms FILE] [--identities ADDR[,ADDR...]]
        hush hooks uninstall
-       hush hooks pre-commit [--terms FILE]
 
   install       write the pre-commit, commit-msg and pre-push hooks into the
                 repository's hooks directory (core.hooksPath, if set); a hook
                 hush did not write is replaced, and a hooks directory inside
                 the work tree is used, only with --force
   uninstall     remove the hooks hush wrote, and no others
-  pre-commit    scan the git index, as the pre-commit hook does; exits 2 if
-                GIT_INDEX_FILE is set but empty or names no regular file
-  --terms FILE  also match the term sets in FILE (the private tier, for the
+  --terms FILE  scan with the term sets in FILE (the private tier, for the
                 review machine); without it the hooks run the generic tier
+                alone (--generic-only)
+  --identities ADDR[,ADDR...]
+                pass these addresses where they stand as an identity, as
+                "hush scan --identities" does, in every hook
 
-The hooks run this hush binary by the path it was started by, made
-absolute. pre-commit scans the index, commit-msg scans the message as
-standard input labelled commit-message, and pre-push scans each pushed ref's
-name, labelled pushed-ref, and its range: a new branch against the commits
-the destination advertises (heads and tags) that this repository has, and a
-deleted branch not at all. pre-push refuses a pushed ref that does not point
-to a commit.
+Every hook scans for the public destination. The hooks run this hush binary
+by the path it was started by, made absolute. pre-commit scans the index
+(hush scan --index), commit-msg scans the message as standard input labelled
+commit-message, and pre-push scans each pushed ref's name, labelled
+pushed-ref, and its range: a new branch against the commits the destination
+advertises (heads and tags) that this repository has, and a deleted branch
+not at all. pre-push refuses a pushed ref that does not point to a commit.
 `
 
 // hooksCommand runs "hush hooks ARGS".
-func hooksCommand(args []string, stdout, stderr io.Writer) int {
+func (p *process) hooksCommand(args []string) int {
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
-		io.WriteString(stdout, hooksUsage)
-		return 0
+		return p.text(hooksUsage)
 	}
-	if len(args) == 0 || args[0] != "install" && args[0] != "uninstall" && args[0] != "pre-commit" {
-		output.Error(stderr, "hooks needs install, uninstall or pre-commit (see hush hooks --help)")
-		return 2
+	if len(args) == 0 || args[0] != "install" && args[0] != "uninstall" {
+		return p.fail("hooks needs install or uninstall (see hush hooks --help)")
 	}
 	sub := args[0]
-	terms, hasTerms, force := "", false, false
+	terms, hasTerms, identities, idsAt, force := "", false, "", 0, false
 	for i := 1; i < len(args); i++ {
 		switch {
 		case args[i] == "--force" && sub == "install" && !force:
 			force = true
-		case args[i] == "--terms" && sub != "uninstall" && !hasTerms && i+1 < len(args):
+		case args[i] == "--terms" && sub == "install" && !hasTerms && i+1 < len(args):
 			terms, hasTerms = args[i+1], true
 			i++
+		case args[i] == "--identities" && sub == "install" && idsAt == 0 && i+1 < len(args):
+			identities, idsAt = args[i+1], i+2
+			i++
 		default:
-			output.Error(stderr, "hooks "+sub+": unexpected argument "+strconv.Itoa(i+1)+" (see hush hooks --help)")
-			return 2
+			return p.fail("hooks " + sub + ": unexpected argument " + strconv.Itoa(i+1) + " (see hush hooks --help)")
 		}
 	}
-	if hasTerms && terms == "" {
-		output.Error(stderr, "term file missing or unreadable")
-		return 2
+	if sub == "uninstall" {
+		return p.hooksUninstall()
 	}
-	switch sub {
-	case "install":
-		return hooksInstall(terms, force, stdout, stderr)
-	case "uninstall":
-		return hooksUninstall(stdout, stderr)
+	if idsAt > 0 {
+		// Checked as hush scan checks it, before anything is written
+		// (HSH-11/D24).
+		if _, err := hush.NewIdentities(strings.Split(identities, ",")); err != nil {
+			return p.failError(withArgument(err, idsAt))
+		}
 	}
-	return preCommit(terms, stdout, stderr)
+	if hasTerms {
+		// The file is checked now rather than at the first commit, and the
+		// hooks, which run at the top of the work tree, get its absolute path.
+		limitCore()
+		if _, err := hush.LoadTermSets(terms); err != nil {
+			return p.failError(err)
+		}
+		var err error
+		if terms, err = filepath.Abs(terms); err != nil {
+			return p.failError(nil)
+		}
+	}
+	return p.hooksInstall(terms, identities, force)
 }
 
 // hooksInstall writes the hooks for the repository in the current directory.
-func hooksInstall(terms string, force bool, stdout, stderr io.Writer) int {
+func (p *process) hooksInstall(terms, identities string, force bool) int {
 	exe, err := hushPath()
 	if err != nil {
-		output.Error(stderr, "cannot find the hush binary")
-		return 2
-	}
-	if terms != "" {
-		// The hooks run at the top of the work tree, so they get an absolute
-		// path, and the file is checked now rather than at the first commit.
-		if terms, err = filepath.Abs(terms); err != nil {
-			output.Error(stderr, "term file missing or unreadable")
-			return 2
-		}
-		if _, err := loadTerms(terms); err != nil {
-			output.Error(stderr, err.Error())
-			return 2
-		}
+		return p.fail("cannot find the hush binary")
 	}
 	// The hooks hold absolute paths, so they must not land where they could be
 	// committed (HSH-9/D14).
@@ -104,19 +105,20 @@ func hooksInstall(terms string, force bool, stdout, stderr io.Writer) int {
 		err = errors.New("the hooks directory is inside the work tree, and the hooks hold absolute paths that must not be committed (give --force to install them there)")
 	}
 	if err == nil {
-		err = hooks.Install(dir, exe, terms, force)
+		err = hooks.Install(dir, exe, terms, identities, force)
 	}
 	if err != nil {
-		output.Error(stderr, err.Error())
-		return 2
+		return p.fail(err.Error())
 	}
+	var b strings.Builder
 	for _, name := range hooks.Names {
-		io.WriteString(stdout, name+": installed\n")
+		b.WriteString(name + ": installed\n")
 	}
+	code := p.text(b.String())
 	if inTree {
-		output.Error(stderr, "warning: the hooks directory is inside the work tree; the hooks hold absolute paths and must not be committed")
+		output.Error(p.stderr, "warning: the hooks directory is inside the work tree; the hooks hold absolute paths and must not be committed")
 	}
-	return 0
+	return code
 }
 
 // hushPath returns the path hush was started by, made absolute without
@@ -147,69 +149,22 @@ func hushPath() (string, error) {
 
 // hooksUninstall removes the hooks hush wrote for the repository in the
 // current directory.
-func hooksUninstall(stdout, stderr io.Writer) int {
+func (p *process) hooksUninstall() int {
 	dir, err := target.HooksDir("")
 	if err != nil {
-		output.Error(stderr, err.Error())
-		return 2
+		return p.fail(err.Error())
 	}
 	removed, left, err := hooks.Uninstall(dir)
+	var b strings.Builder
 	for _, name := range removed {
-		io.WriteString(stdout, name+": removed\n")
+		b.WriteString(name + ": removed\n")
 	}
 	for _, name := range left {
-		io.WriteString(stdout, name+": left in place, not written by hush\n")
+		b.WriteString(name + ": left in place, not written by hush\n")
 	}
 	if err != nil {
-		output.Error(stderr, err.Error())
-		return 2
+		io.WriteString(p.stdout, b.String())
+		return p.fail(err.Error())
 	}
-	return 0
-}
-
-// preCommit scans the index of the repository in the current directory,
-// which is where git runs the pre-commit hook. A GIT_INDEX_FILE that is set
-// must name a regular file, or the index target would read an empty index
-// and pass, and the index target gets it made absolute against this
-// directory (HSH-9/D5).
-func preCommit(terms string, stdout, stderr io.Writer) int {
-	index := ""
-	if value, ok := os.LookupEnv("GIT_INDEX_FILE"); ok {
-		var err error
-		if index, err = hooks.CheckIndexFile(value); err != nil {
-			output.Error(stderr, err.Error())
-			return 2
-		}
-	}
-	out := output.New(stdout)
-	s, err := newScan(terms, out, stderr)
-	if err == nil {
-		s.IndexFile = index
-		err = s.Index("")
-	}
-	if out.Flush() != nil {
-		return 2 // findings cannot be written (HSH-5/D13)
-	}
-	if err != nil {
-		output.Error(stderr, err.Error())
-		return 2
-	}
-	if out.Found > 0 {
-		return 1
-	}
-	return 0
-}
-
-// newScan returns a scan with the generic rules and, when terms is not "",
-// the sets in that term file, as hush scan builds it.
-func newScan(terms string, out *output.Writer, stderr io.Writer) (*target.Scan, error) {
-	s := &target.Scan{Rules: genericRules(), Out: out, Terms: terms, GitStderr: stderr}
-	if terms != "" {
-		sets, err := loadTerms(terms)
-		if err != nil {
-			return nil, err
-		}
-		s.Sets = sets
-	}
-	return s, nil
+	return p.text(b.String())
 }

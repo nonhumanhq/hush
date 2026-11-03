@@ -1,11 +1,29 @@
 package main
 
 import (
+	"context"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/nonhumanhq/hush/internal/leakcheck"
 )
+
+// TestMain keeps the in-process runs from lowering this process's core-dump
+// limit: a hard limit of 0 is inherited by every child and cannot be raised,
+// so TestLimitCore could not raise it for the built binary (HSH-11/D44).
+func TestMain(m *testing.M) {
+	setCoreLimit = func() {}
+	os.Exit(m.Run())
+}
+
+// run runs one hush command in this process, as main does but with no
+// signals, and returns its exit status.
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	p := &process{stdin: stdin, stdout: stdout, stderr: stderr}
+	return p.run(context.Background(), args)
+}
 
 func TestCommands(t *testing.T) {
 	for _, c := range []struct {
@@ -13,14 +31,15 @@ func TestCommands(t *testing.T) {
 		code       int
 		out, error string // prefixes of standard output and standard error
 	}{
-		{nil, 2, "", "hush-interim: no command (see hush --help)\n"},
-		{[]string{"--help"}, 0, "usage: hush scan [--terms FILE] PATH...\n", ""},
+		{nil, 2, "", "hush: no command (see hush --help)\n"},
+		{[]string{"--help"}, 0, "usage: hush scan --destination DEST [--terms FILE | --generic-only]\n", ""},
 		{[]string{"-h"}, 0, "usage: hush scan", ""},
-		{[]string{"scan", "--help"}, 0, "usage: hush scan [--terms FILE] PATH...\n", ""},
+		{[]string{"--help", "scan"}, 2, "", "hush: --help is accepted only alone\n"},
+		{[]string{"scan", "--help"}, 0, "usage: hush scan --destination DEST [--terms FILE | --generic-only]\n", ""},
 		{[]string{"version"}, 0, "hush ", ""},
-		{[]string{"version", leakcheck.Bad}, 2, "", "hush-interim: version takes no arguments\n"},
-		{[]string{leakcheck.Client}, 2, "", "hush-interim: unknown command (see hush --help)\n"},
-		{[]string{"scan"}, 2, "", "hush-interim: give exactly one of PATH..., --range or --stdin (see --help)\n"},
+		{[]string{"version", leakcheck.Bad}, 2, "", "hush: version takes no arguments\n"},
+		{[]string{leakcheck.Client}, 2, "", "hush: unknown command (see hush --help)\n"},
+		{[]string{"scan"}, 2, "", "hush: the scan needs --destination (see hush scan --help)\n"},
 	} {
 		var out, errs strings.Builder
 		code := run(c.args, strings.NewReader(""), &out, &errs)

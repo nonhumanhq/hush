@@ -1,5 +1,5 @@
-// Package output writes the interim scanner's plain format: one finding per
-// line, "WHERE:LINE: RULE", and one error line on standard error.
+// Package output writes the plain format: one finding per line,
+// "WHERE:LINE: RULE", and one error line on standard error.
 package output
 
 import (
@@ -8,9 +8,9 @@ import (
 	"strconv"
 )
 
-// Prefix starts every error line. It keeps the interim scanner's name so that
-// standard error stays byte-identical (HSH-5/D4).
-const Prefix = "hush-interim: "
+// Prefix starts every error line (ADR-001 section 6.2; it was the interim
+// scanner's name until HSH-11's part c, HSH-5/D4).
+const Prefix = "hush: "
 
 // Writer prints findings and counts them. Call Flush when the scan ends.
 type Writer struct {

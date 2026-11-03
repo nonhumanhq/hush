@@ -110,6 +110,9 @@ func (s *Scan) RevList(repo string, args []string) error {
 		}
 		s.Counts.Commits++
 		s.commit(sha, obj)
+		if s.failed != nil {
+			return s.failed
+		}
 		if err := s.flush(); err != nil {
 			return err
 		}
@@ -122,6 +125,9 @@ func (s *Scan) RevList(repo string, args []string) error {
 			return &Error{Kind: DiffFailed, Commit: sha, text: "cannot diff commit " + short}
 		}
 		s.diff(sha, diff)
+		if s.failed != nil {
+			return s.failed
+		}
 		if err := s.flush(); err != nil {
 			return err
 		}
@@ -287,16 +293,24 @@ func (s *Scan) Index(repo string) error {
 			continue
 		}
 		s.Counts.Files++
-		data, err := readObject(r)
+		data, err := readObject(r, s.MaxFile)
 		if err != nil {
 			c.Process.Kill() // cat-file would block on the output left unread
 			c.Wait()
+			if err == errTooLarge {
+				return fail(TooLarge, "input over the size limit")
+			}
 			return bad
 		}
 		if bytes.IndexByte(data, 0) >= 0 {
 			s.unscanned(at, "binary-unscanned")
 		} else {
 			s.text(at, data, fileContext(e.path)) // a symlink's blob is its target text
+		}
+		if s.failed != nil {
+			c.Process.Kill()
+			c.Wait()
+			return s.failed
 		}
 	}
 	if c.Wait() != nil {
@@ -321,8 +335,12 @@ func escape(p string) string {
 	return b.String()
 }
 
-// readObject reads one "ID TYPE SIZE" record of git cat-file --batch.
-func readObject(r *bufio.Reader) ([]byte, error) {
+// errTooLarge is readObject's error for an object over its limit.
+var errTooLarge = errors.New("object over the size limit")
+
+// readObject reads one "ID TYPE SIZE" record of git cat-file --batch. An
+// object over max bytes (max 0: no limit) is errTooLarge, and is not read.
+func readObject(r *bufio.Reader, max int) ([]byte, error) {
 	head, err := r.ReadString('\n')
 	f := strings.Fields(head)
 	if err != nil || len(f) != 3 {
@@ -331,6 +349,9 @@ func readObject(r *bufio.Reader) ([]byte, error) {
 	size, err := strconv.Atoi(f[2])
 	if err != nil || size < 0 {
 		return nil, errors.New("bad object")
+	}
+	if max > 0 && size > max {
+		return nil, errTooLarge
 	}
 	data := make([]byte, size+1)
 	if _, err := io.ReadFull(r, data); err != nil || data[size] != '\n' {

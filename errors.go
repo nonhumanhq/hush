@@ -60,6 +60,21 @@ func (e *Error) Line() int { return e.line }
 // Commit returns the full object id of the commit the error concerns, or "".
 func (e *Error) Commit() string { return e.commit }
 
+// WithArgument returns a copy of e that concerns the n-th argument of a
+// command line: Argument returns n, and the message starts with
+// "argument N: ". A command line uses it for an error about a value it took
+// from its arguments, such as a destination, a range or a stdin label, so the
+// message cites the value's position and never the value (ADR-001 section
+// 6.6). A nil e, or n below 1, gives e unchanged.
+func (e *Error) WithArgument(n int) *Error {
+	if e == nil || n < 1 {
+		return e
+	}
+	c := *e
+	c.arg, c.msg = n, "argument "+strconv.Itoa(n)+": "+e.msg
+	return &c
+}
+
 // Is reports whether target is the sentinel for the error's code, such as
 // ErrUsage, so that errors.Is(err, hush.ErrUsage) works.
 func (e *Error) Is(target error) bool {
@@ -123,7 +138,6 @@ const (
 	msgTermTooLarge     = "term file: over the size limit"
 	msgLabelRefused     = "stdin label refused"
 	msgPathMissing      = "path argument # does not exist"
-	msgPathUnwalkable   = "cannot walk path argument #"
 	msgPathUnresolved   = "cannot resolve path argument #"
 	msgRootNotDir       = "the scan root is not a directory"
 	msgNotRepository    = "not a git repository"
@@ -140,6 +154,7 @@ const (
 	msgStdinUnreadable  = "cannot read standard input"
 	msgTooLarge         = "input over the size limit"
 	msgOutput           = "cannot write output"
+	msgNoDocument       = "the document needs a coverage and a target"
 	msgInterrupted      = "interrupted"
 	msgInternal         = "internal error; output withheld"
 )

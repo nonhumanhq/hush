@@ -54,6 +54,7 @@ func TestOutputCheck(t *testing.T) {
 		{Loc: target.InStdin, Label: "<stdin>", Rule: "binary-unscanned"},
 		{Loc: target.InDiff, Commit: id, Path: "a", Rule: "unreadable"},
 		{Loc: target.InCommit, Commit: id, Part: rule.Message, Rule: "ip-address", Line: 5},
+		{Loc: target.InTree, Path: "a", Rule: "unreadable", InPath: true}, // a path that cannot print safely
 	}
 	for i, raw := range good {
 		if _, ok := s.finding(raw); !ok {
@@ -65,7 +66,7 @@ func TestOutputCheck(t *testing.T) {
 		{Loc: target.InTree, Path: "a", Rule: "set:nosuchset"},
 		{Loc: target.InTree, Path: "a", Rule: "set:"},
 		{Loc: target.InTree, Path: "a", Rule: ""},
-		{Loc: target.InTree, Path: "a", Rule: "unreadable", InPath: true},
+		{Loc: target.InTree, Path: "a", Rule: "binary-unscanned", InPath: true},
 		{Loc: target.InTree, Path: "", Rule: "id-prefix"},
 		{Loc: target.InCommit, Commit: id, Rule: "id-prefix"}, // no part
 		{Loc: 0, Path: "a", Rule: "id-prefix"},
@@ -81,7 +82,7 @@ func TestOutputCheck(t *testing.T) {
 	}
 
 	// A refused finding stops the scan with the internal error.
-	r, err := s.start(context.Background())
+	r, err := s.start(context.Background(), TargetTree)
 	if err != nil {
 		t.Fatal(err)
 	}

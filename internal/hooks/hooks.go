@@ -1,5 +1,5 @@
-// Package hooks writes and removes the git hooks hush installs, and checks the
-// hook environment before an index scan. It is used by the CLI only.
+// Package hooks writes and removes the git hooks hush installs. It is used by
+// the CLI only.
 package hooks
 
 import (
@@ -24,7 +24,10 @@ const marker = `# Written by "hush hooks install"; "hush hooks uninstall" remove
 // branch is scanned against the commits the destination advertises (heads and
 // tags) that this repository has, each once, asked once per push and only
 // when ls-remote reads the URL pushed to as given, and whole otherwise or when
-// git ls-remote fails. HUSH_SCAN stands for hush's scan command.
+// git ls-remote fails. HUSH_SCAN stands for hush's scan command with its
+// destination, tier and identities (HSH-11/D23, D24). The advertised commits
+// are handed to the range as revisions to exclude, after --not, which ADR-001
+// section 5's range grammar accepts as Range.Exclude.
 const prePush = `# Replace refs off, so that a blob or a tree cannot pass for a commit.
 GIT_NO_REPLACE_OBJECTS=1; export GIT_NO_REPLACE_OBJECTS
 asked=; not=
@@ -34,7 +37,7 @@ while read -r line; do
 	rsha=${line##* }; line=${line% *}; rref=${line##* }; line=${line% *}; lsha=${line##* }
 	case $lsha in *[!0]*) ;; *) continue ;; esac # a branch deletion
 	if ! git rev-parse -q --verify "$lsha^{commit}" >/dev/null 2>&1; then
-		echo 'hush-interim: a pushed ref does not point to a commit, so hush cannot scan it' >&2
+		echo 'hush: a pushed ref does not point to a commit, so hush cannot scan it' >&2
 		exit 2
 	fi
 	printf '%s\n' "$rref" | HUSH_SCAN --label pushed-ref --stdin || exit
@@ -55,26 +58,31 @@ while read -r line; do
 		fi
 		revs="$lsha${not:+ --not$not}" ;;
 	esac
-	HUSH_SCAN --range "$revs" </dev/null || exit
+	HUSH_SCAN --allow-empty-range --range "$revs" </dev/null || exit
 done
 `
 
 // Script returns the text of the hook called name. exe is hush's absolute
-// path, and terms is an absolute term-file path, or "" for the generic tier
-// only (HSH-9/D1, D4).
-func Script(name, exe, terms string) string {
-	opt := ""
+// path; terms is an absolute term-file path, or "" for the generic tier only
+// (HSH-9/D1, D4); and identities is the --identities value, or "" for none.
+// Every hook scans for the public destination, and each value is written
+// shell-quoted (HSH-11/D24).
+func Script(name, exe, terms, identities string) string {
+	scan := quote(exe) + " scan --destination public --generic-only"
 	if terms != "" {
-		opt = " --terms " + quote(terms)
+		scan = quote(exe) + " scan --destination public --terms " + quote(terms)
+	}
+	if identities != "" {
+		scan += " --identities " + quote(identities)
 	}
 	head := "#!/bin/sh\n" + marker + "\n"
 	switch name {
 	case "pre-commit":
-		return head + "exec " + quote(exe) + " hooks pre-commit" + opt + "\n"
+		return head + "exec " + scan + " --index\n"
 	case "commit-msg":
-		return head + "exec " + quote(exe) + " scan" + opt + ` --label commit-message --stdin < "$1"` + "\n"
+		return head + "exec " + scan + ` --label commit-message --stdin < "$1"` + "\n"
 	case "pre-push":
-		return head + strings.ReplaceAll(prePush, "HUSH_SCAN", quote(exe)+" scan"+opt)
+		return head + strings.ReplaceAll(prePush, "HUSH_SCAN", scan)
 	}
 	return ""
 }
@@ -82,10 +90,10 @@ func Script(name, exe, terms string) string {
 // quote returns s single-quoted for sh.
 func quote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
-// Install writes the three hooks into dir, creating it if needed. If a hook
-// exists that hush did not write, Install writes nothing and fails, unless
-// force is set (HSH-9/D2).
-func Install(dir, exe, terms string, force bool) error {
+// Install writes the three hooks into dir, creating it if needed, with
+// Script's arguments. If a hook exists that hush did not write, Install
+// writes nothing and fails, unless force is set (HSH-9/D2).
+func Install(dir, exe, terms, identities string, force bool) error {
 	for _, name := range Names {
 		exists, ours, err := owner(filepath.Join(dir, name))
 		if err != nil {
@@ -99,7 +107,7 @@ func Install(dir, exe, terms string, force bool) error {
 		return errors.New("cannot create the hooks directory")
 	}
 	for _, name := range Names {
-		if err := write(dir, name, Script(name, exe, terms)); err != nil {
+		if err := write(dir, name, Script(name, exe, terms, identities)); err != nil {
 			return err
 		}
 	}
@@ -163,25 +171,4 @@ func write(dir, name, text string) error {
 		return bad
 	}
 	return nil
-}
-
-// CheckIndexFile checks the value of GIT_INDEX_FILE, when it is set, before
-// an index scan, and returns it made absolute against the working directory.
-// git would resolve a relative value against the top of the work tree, so the
-// index target gets the absolute path (HSH-9/D5). The index target reads an
-// empty value, a missing file or a dangling symlink as an empty index, so the
-// scan would pass (HSH-5/D6). Symlinks are followed, and the file is never
-// opened, so a FIFO cannot block the check.
-func CheckIndexFile(value string) (string, error) {
-	if value == "" {
-		return "", errors.New("GIT_INDEX_FILE is set but empty")
-	}
-	abs, err := filepath.Abs(value)
-	if err != nil {
-		return "", errors.New("cannot find the working directory")
-	}
-	if fi, err := os.Stat(abs); err != nil || !fi.Mode().IsRegular() {
-		return "", errors.New("GIT_INDEX_FILE does not name a regular file")
-	}
-	return abs, nil
 }

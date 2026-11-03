@@ -7,7 +7,6 @@ type Kind uint8
 // The conditions a target reports as errors.
 const (
 	PathMissing      Kind = iota + 1 // a path argument does not exist: Arg
-	PathUnwalkable                   // a directory cannot be walked: Arg
 	PathUnresolved                   // a path argument's directory cannot be resolved: Arg
 	TermFileInside                   // a path argument holds the term file
 	NotRepository                    // the directory is not a git repository
@@ -17,6 +16,8 @@ const (
 	IndexUnreadable                  // the index cannot be listed or read
 	StdinUnreadable                  // standard input cannot be read
 	Interrupted                      // Scan.Ctx is done
+	TooLarge                         // a file, blob or line is over Scan's size limits
+	TermFileGone                     // the term file cannot be found again to compare with the tree
 )
 
 // Error is a target's error: a kind, the interim scanner's fixed text, and an

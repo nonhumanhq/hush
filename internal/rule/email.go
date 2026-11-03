@@ -56,7 +56,10 @@ func (e EmailAddress) Check(line []byte, ctx Context) (start int, broken bool) {
 	allowed := len(e.ids) > 0 && identityPosition(line, ctx)
 	start = -1
 	for _, m := range bareAddress.FindAllIndex(line, -1) {
-		if e.flags(line[m[0]:m[1]], allowed) {
+		// The bare pattern's matches do not overlap, so in "A@B@C" or
+		// "A@B\@C" the "@C" is never a candidate: a listed "A@B" passes
+		// only when no "@" or "\@" follows it (HSH-11/D16).
+		if e.flags(line[m[0]:m[1]], allowed && !chained(line[m[1]:])) {
 			start = m[0]
 			break
 		}
@@ -70,6 +73,12 @@ func (e EmailAddress) Check(line []byte, ctx Context) (start int, broken bool) {
 		}
 	}
 	return start, start >= 0
+}
+
+// chained reports whether rest, the text after a bare candidate, begins with
+// "@" or "\@", so that the candidate is only the start of a longer address.
+func chained(rest []byte) bool {
+	return bytes.HasPrefix(rest, []byte("@")) || bytes.HasPrefix(rest, []byte(`\@`))
 }
 
 // flags reports whether the rule flags the candidate addr. allowed says an

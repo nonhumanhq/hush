@@ -18,10 +18,14 @@ import (
 // larger one is refused with ErrRead (HSH-11/D4).
 const MaxTermFileSize = 1 << 20
 
-// MaxInputSize is the largest buffer or stream ScanBytes and ScanReader scan,
-// in bytes. A larger one is refused with ErrRead; nothing is ever skipped
-// (HSH-11/D4).
+// MaxInputSize is the largest buffer, stream, tree file or index blob a scan
+// reads, in bytes. A larger one stops the scan with ErrRead; nothing is ever
+// skipped (HSH-11/D4).
 const MaxInputSize = 64 << 20
+
+// MaxLineSize is the longest line a scan reads, in bytes, without its
+// newline. A longer one stops the scan with ErrRead (HSH-11/D4).
+const MaxLineSize = 4 << 20
 
 // TermSets is the private tier: the sets of one term file, in ADR-002's
 // format 1, held in memory. Load it with LoadTermSets. No method returns,

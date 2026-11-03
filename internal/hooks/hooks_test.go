@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 
 	lc "github.com/nonhumanhq/hush/internal/leakcheck"
@@ -13,23 +12,28 @@ import (
 
 func TestScript(t *testing.T) {
 	head := "#!/bin/sh\n" + marker + "\n"
-	for _, c := range []struct{ name, terms, want string }{
-		{"pre-commit", "", head + "exec '/opt/a b/hush' hooks pre-commit\n"},
-		{"pre-commit", "/home/alice/terms.txt", head + "exec '/opt/a b/hush' hooks pre-commit --terms '/home/alice/terms.txt'\n"},
-		{"commit-msg", "", head + `exec '/opt/a b/hush' scan --label commit-message --stdin < "$1"` + "\n"},
-		{"commit-msg", "/t/it's", head + `exec '/opt/a b/hush' scan --terms '/t/it'\''s' --label commit-message --stdin < "$1"` + "\n"},
+	const exe = "'/opt/a b/hush' scan --destination public"
+	for _, c := range []struct{ name, terms, ids, want string }{
+		{"pre-commit", "", "", head + "exec " + exe + " --generic-only --index\n"},
+		{"pre-commit", "/home/alice/terms.txt", "", head + "exec " + exe + " --terms '/home/alice/terms.txt' --index\n"},
+		{"pre-commit", "", "alice@example.org", head + "exec " + exe + " --generic-only --identities 'alice@example.org' --index\n"},
+		{"commit-msg", "", "", head + "exec " + exe + ` --generic-only --label commit-message --stdin < "$1"` + "\n"},
+		{"commit-msg", "/t/it's", "", head + "exec " + exe + ` --terms '/t/it'\''s' --label commit-message --stdin < "$1"` + "\n"},
+		// The value is written shell-quoted, whatever it holds (HSH-11/D24).
+		{"commit-msg", "/t/x", "a'b@x,$(c)@y", head + "exec " + exe + ` --terms '/t/x' --identities 'a'\''b@x,$(c)@y' --label commit-message --stdin < "$1"` + "\n"},
 	} {
-		if got := Script(c.name, "/opt/a b/hush", c.terms); got != c.want {
-			t.Errorf("%s with terms %q:\n got %q\nwant %q", c.name, c.terms, got, c.want)
+		if got := Script(c.name, "/opt/a b/hush", c.terms, c.ids); got != c.want {
+			t.Errorf("%s with terms %q and identities %q:\n got %q\nwant %q", c.name, c.terms, c.ids, got, c.want)
 		}
 	}
-	push := Script("pre-push", "/opt/hush", "/t/terms")
+	push := Script("pre-push", "/opt/hush", "/t/terms", "bob@example.org")
+	scan := "'/opt/hush' scan --destination public --terms '/t/terms' --identities 'bob@example.org'"
 	if !strings.HasPrefix(push, head) || strings.Contains(push, "HUSH_SCAN") ||
-		!strings.Contains(push, "\t'/opt/hush' scan --terms '/t/terms' --range \"$revs\" </dev/null || exit\n") ||
-		!strings.Contains(push, "| '/opt/hush' scan --terms '/t/terms' --label pushed-ref --stdin || exit\n") {
+		!strings.Contains(push, "\t"+scan+" --allow-empty-range --range \"$revs\" </dev/null || exit\n") ||
+		!strings.Contains(push, "| "+scan+" --label pushed-ref --stdin || exit\n") {
 		t.Errorf("pre-push:\n%s", push)
 	}
-	if Script("post-commit", "/opt/hush", "") != "" {
+	if Script("post-commit", "/opt/hush", "", "") != "" {
 		t.Error("an unknown hook has a script")
 	}
 }
@@ -45,17 +49,17 @@ func read(t *testing.T, path string) string {
 
 func TestInstall(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "hooks") // missing: Install creates it
-	if err := Install(dir, "/opt/hush", "", false); err != nil {
+	if err := Install(dir, "/opt/hush", "", "", false); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range Names {
 		fi, err := os.Stat(filepath.Join(dir, name))
-		if err != nil || fi.Mode().Perm() != 0o755 || read(t, filepath.Join(dir, name)) != Script(name, "/opt/hush", "") {
+		if err != nil || fi.Mode().Perm() != 0o755 || read(t, filepath.Join(dir, name)) != Script(name, "/opt/hush", "", "") {
 			t.Errorf("%s: not written as expected (%v)", name, err)
 		}
 	}
 	// Its own hooks are replaced without --force.
-	if err := Install(dir, "/opt/hush", "/t/terms", false); err != nil || read(t, filepath.Join(dir, "pre-push")) != Script("pre-push", "/opt/hush", "/t/terms") {
+	if err := Install(dir, "/opt/hush", "/t/terms", "", false); err != nil || read(t, filepath.Join(dir, "pre-push")) != Script("pre-push", "/opt/hush", "/t/terms", "") {
 		t.Errorf("reinstall: %v", err)
 	}
 
@@ -75,7 +79,7 @@ func TestInstall(t *testing.T) {
 		if before == "" {
 			before = read(t, path)
 		}
-		err := Install(dir, "/opt/hush", "", false)
+		err := Install(dir, "/opt/hush", "", "", false)
 		if fmt.Sprint(err) != "the commit-msg hook was not written by hush (give --force to replace it)" {
 			t.Errorf("foreign hook: %v", err)
 		}
@@ -89,10 +93,10 @@ func TestInstall(t *testing.T) {
 			t.Errorf("foreign hook: %d entries after a refused install", len(entries))
 		}
 		// --force replaces it, and a symlink itself, not its target.
-		if err := Install(dir, "/opt/hush", "", true); err != nil {
+		if err := Install(dir, "/opt/hush", "", "", true); err != nil {
 			t.Fatal(err)
 		}
-		if fi, err := os.Lstat(path); err != nil || !fi.Mode().IsRegular() || read(t, path) != Script("commit-msg", "/opt/hush", "") {
+		if fi, err := os.Lstat(path); err != nil || !fi.Mode().IsRegular() || read(t, path) != Script("commit-msg", "/opt/hush", "", "") {
 			t.Errorf("forced install: %v", err)
 		}
 		if _, err := os.Stat(filepath.Join(dir, "pre-commit.sample")); err == nil {
@@ -105,10 +109,10 @@ func TestInstall(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "pre-push"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := Install(dir, "/opt/hush", "", false); err == nil {
+	if err := Install(dir, "/opt/hush", "", "", false); err == nil {
 		t.Error("a directory in a hook's place: no error")
 	}
-	err := Install(dir, "/opt/hush", "", true)
+	err := Install(dir, "/opt/hush", "", "", true)
 	if fmt.Sprint(err) != "cannot write the pre-push hook" {
 		t.Errorf("forced install over a directory: %v", err)
 	}
@@ -120,7 +124,7 @@ func TestInstall(t *testing.T) {
 
 func TestUninstall(t *testing.T) {
 	dir := t.TempDir()
-	if err := Install(dir, "/opt/hush", "", false); err != nil {
+	if err := Install(dir, "/opt/hush", "", "", false); err != nil {
 		t.Fatal(err)
 	}
 	other := "#!/bin/sh\nexit 0\n"
@@ -142,39 +146,5 @@ func TestUninstall(t *testing.T) {
 	removed, left, err = Uninstall(t.TempDir())
 	if err != nil || removed != nil || left != nil {
 		t.Errorf("uninstall with no hooks: removed %v, left %v, error %v", removed, left, err)
-	}
-}
-
-func TestCheckIndexFile(t *testing.T) {
-	dir := t.TempDir()
-	t.Chdir(dir)
-	index := filepath.Join(dir, "index")
-	if err := os.WriteFile(index, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	link, dangling, fifo := filepath.Join(dir, "link"), filepath.Join(dir, "dangling"), filepath.Join(dir, "fifo")
-	if os.Symlink("index", link) != nil || os.Symlink("none", dangling) != nil || syscall.Mkfifo(fifo, 0o644) != nil ||
-		os.Mkdir("sub", 0o755) != nil {
-		t.Fatal("setup failed")
-	}
-	const empty, notFile = "GIT_INDEX_FILE is set but empty", "GIT_INDEX_FILE does not name a regular file"
-	for _, c := range []struct{ value, path, want string }{
-		{"", "", empty},
-		{filepath.Join(dir, "missing"), "", notFile},
-		{dangling, "", notFile},
-		{dir, "", notFile},
-		{fifo, "", notFile},
-		{"sub/../missing", "", notFile},
-		{index, index, "<nil>"},
-		{link, link, "<nil>"},
-		// A relative value is made absolute against the working directory,
-		// and the symlink is kept (HSH-9/D5).
-		{"sub/../link", link, "<nil>"},
-	} {
-		path, err := CheckIndexFile(c.value)
-		if path != c.path || fmt.Sprint(err) != c.want {
-			t.Errorf("%s: %q, %v, want %q, %s", filepath.Base(c.value), path, err, c.path, c.want)
-		}
-		lc.Check(t, fmt.Sprint(err))
 	}
 }

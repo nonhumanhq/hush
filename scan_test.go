@@ -38,7 +38,8 @@ func TestScanBuffers(t *testing.T) {
 		t.Errorf("NUL: %v", err)
 	}
 	for _, label := range []string{"-x", ".x", "a b", "a/b", "a:b", "<stdin>", strings.Repeat("a", 65),
-		"x" + lc.Quorvel, "notes-" + strings.ToUpper(lc.Zantoph), lc.Bad, "203.0.114" + ".7"} {
+		"x" + lc.Quorvel, "notes-" + strings.ToUpper(lc.Zantoph), lc.Bad, "203.0.114" + ".7",
+		lc.LabelA, strings.ToUpper(lc.LabelB)} { // a declared client label, in any ASCII case
 		rep, err := s.ScanBytes(bg, label, []byte("clean\n"))
 		wantError(t, err, CodeLabel)
 		if rep != nil || err.Error() != "stdin label refused" {
@@ -72,7 +73,7 @@ func TestScanBuffersTooLarge(t *testing.T) {
 	s := scanner(t, Config{Destination: Public(), GenericOnly: true})
 	big := make([]byte, MaxInputSize+1)
 	for i := range big {
-		big[i] = 'a'
+		big[i] = "aaaaaaa\n"[i%8] // lines under MaxLineSize
 	}
 	_, err := s.ScanBytes(bg, "", big)
 	wantError(t, err, CodeRead)
@@ -131,7 +132,7 @@ func TestContextCancelled(t *testing.T) {
 	}
 	// A context done during the scan: the run stops at the next file.
 	ctx, cancel = context.WithCancel(bg)
-	r, err := s.start(ctx)
+	r, err := s.start(ctx, TargetTree)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +160,7 @@ func TestContextCancelledAtEnd(t *testing.T) {
 	}
 	for name, scan := range scans {
 		ctx, cancel := context.WithCancel(bg)
-		r, err := s.start(ctx)
+		r, err := s.start(ctx, TargetRange)
 		if err != nil {
 			t.Fatal(err)
 		}

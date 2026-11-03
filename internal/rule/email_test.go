@@ -269,6 +269,28 @@ func TestEmailAddressOnlyTheListedAddress(t *testing.T) {
 	}
 }
 
+// A listed address that "@" or "\@" follows is only the start of a longer
+// address: in an identity position it is flagged at its own offset, as it is
+// without the allowance (HSH-11/D16).
+func TestEmailAddressChained(t *testing.T) {
+	r := newReport(t)
+	defer r.done()
+	for _, sep := range []string{"@", `\@`, "@@", `\@\@`} {
+		line := "Signed-off-by: " + lc.Identity + sep + "evil.internal"
+		for _, e := range []EmailAddress{{}, allowance} {
+			if start, b := e.Check([]byte(line), inMessage); !b || start != len("Signed-off-by: ") {
+				r.errorf("%q: offset %d, flagged %t", sep, start, b)
+			}
+		}
+	}
+	// One character between them, or a trailing "\", is not a chain.
+	for _, rest := range []string{" @x", ` \@x`, `\`, ".", ""} {
+		if broken(allowance, "Signed-off-by: "+lc.Identity+rest, inMessage) {
+			r.errorf("%q: the identity is flagged", rest)
+		}
+	}
+}
+
 // Where the earliest breaking match begins, bare or bracketed.
 func TestEmailAddressStart(t *testing.T) {
 	r := newReport(t)

@@ -86,23 +86,27 @@ type Scanner struct {
 }
 
 // New checks cfg against ADR-001 section 4's table and returns a Scanner for
-// it. A misconfiguration fails here, before anything is scanned:
-//   - ErrDestination for a zero Destination, or a client label that contains
-//     a term, breaks a generic rule, or is declared by no set;
-//   - ErrCoverage when the destination's tiers do not match Terms and
-//     GenericOnly, or when no term applies to a client destination;
+// it. A misconfiguration fails here, before anything is scanned. New checks,
+// in this order:
+//   - ErrDestination for a zero Destination;
+//   - ErrCoverage when the destination's tiers do not match GenericOnly and
+//     whether Terms is nil;
 //   - ErrTermFile for a TermSets not made by LoadTermSets;
-//   - ErrUsage for an Identities not made by NewIdentities.
+//   - ErrUsage for an Identities not made by NewIdentities;
+//   - ErrDestination for a client label that contains a term, breaks a
+//     generic rule, or is declared by no set;
+//   - ErrCoverage when no term applies to a client destination.
+//
+// The coverage combination depends only on whether Terms is nil, so a caller
+// can check it before it reads a term file by passing new(TermSets) for the
+// file: New then returns ErrCoverage for a combination it refuses, and
+// otherwise ErrTermFile (HSH-11/D42).
 func New(cfg Config) (s *Scanner, err error) {
 	defer recoverError(&err, func() { s = nil })
 	d, terms := cfg.Destination, cfg.Terms
 	switch {
 	case d.class == classNone:
 		return nil, newError(CodeDestination, msgNoDestination, 0)
-	case terms != nil && !terms.loaded():
-		return nil, newError(CodeTermFile, msgTermNotLoaded, 0)
-	case cfg.Identities != nil && cfg.Identities.Len() == 0:
-		return nil, newError(CodeUsage, msgIdentitiesBuilt, 0)
 	case cfg.GenericOnly && terms != nil:
 		return nil, newError(CodeCoverage, msgGenericAndTerms, 0)
 	case cfg.GenericOnly && d.class != classPublic:
@@ -113,6 +117,10 @@ func New(cfg Config) (s *Scanner, err error) {
 		return nil, newError(CodeCoverage, msgClientCoverage, 0)
 	case d.class == classPrivate && terms != nil:
 		return nil, newError(CodeCoverage, msgPrivateTerms, 0)
+	case terms != nil && !terms.loaded():
+		return nil, newError(CodeTermFile, msgTermNotLoaded, 0)
+	case cfg.Identities != nil && cfg.Identities.Len() == 0:
+		return nil, newError(CodeUsage, msgIdentitiesBuilt, 0)
 	}
 	s = &Scanner{dest: d, coverage: Complete, terms: terms}
 	var ids []string

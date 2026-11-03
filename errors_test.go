@@ -40,8 +40,14 @@ var table = sync.OnceValue(func() map[string]string {
 
 // fromTable reports whether msg is a message of the table, with "#" read as an
 // integer, "@" as twelve hex digits, and a term-file line's reason taken from
-// ADR-002 section 1.5's table.
+// ADR-002 section 1.5's table, after an argument's position when
+// Error.WithArgument added one.
 func fromTable(msg string) bool {
+	if rest, ok := strings.CutPrefix(msg, "argument "); ok {
+		if n, after, ok := strings.Cut(rest, ": "); ok && regexp.MustCompile(`^[1-9][0-9]*$`).MatchString(n) {
+			msg = after
+		}
+	}
 	for name, m := range table() {
 		pat := regexp.QuoteMeta(m)
 		pat = strings.ReplaceAll(pat, "#", "[1-9][0-9]*")

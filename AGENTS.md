@@ -65,20 +65,21 @@ is a port of `reference/interim-hush/` at parity, and everything is internal.
   it and `sh reference/interim-hush/hush-interim` over the same synthetic fixtures, and
   needs `git`, `sh`, `awk` and `find`. Without network access, set
   `GOTOOLCHAIN=local GOPROXY=off`.
-- `go run ./cmd/hush scan .` scans the tree with the generic tier.
+- `go run ./cmd/hush scan --destination public --generic-only .` scans the tree with the generic tier.
 
 ## Packages
 | Package | Holds |
 | --- | --- |
-| `hush` (module root) | The public package of ADR-001 section 7: destinations, `LoadTermSets`, `Config` and `New`, the scan entry points, findings with path redaction, the report and the closed error table. The CLI moves onto it in HSH-11's part c |
-| `cmd/hush` | `hush scan` (the interim scanner's arguments), `hush hooks`, `hush gh`, `hush --help`, `hush version` |
-| `internal/target` | Tree, standard input, git range and git index targets; the only package that runs git or opens scanned files. Reports raw findings to package `hush` through a sink, or prints them as the interim scanner does |
+| `hush` (module root) | The public package of ADR-001 section 7: destinations, `LoadTermSets`, `Config` and `New`, the scan entry points, findings with path redaction, the report, the JSON writers and the closed error table |
+| `cmd/hush` | `hush scan` (ADR-001 section 7's grammar, over package `hush`), `hush hooks`, `hush gh`, `hush --help`, `hush version`; signals and the one result written per run |
+| `internal/target` | Tree, standard input, git range and git index targets; the only package that runs git or opens scanned files. Reports raw findings to package `hush` through a sink, or prints them as the interim scanner does for `hush gh` until HSH-11's part e |
 | `internal/rule` | The `Rule` interface, the `id-prefix`, `ip-address` and `email-address` rules and their registry, and the checks and path redaction a rule list gives |
 | `internal/termset` | The term-file parser and matcher; takes bytes, never a path |
 | `internal/output` | The plain finding line, shared with package `hush`, and the error line |
-| `internal/hooks` | The git hooks `hush hooks` writes and removes, and the `GIT_INDEX_FILE` check; CLI only |
+| `internal/hooks` | The git hooks `hush hooks` writes and removes; CLI only |
 | `internal/ghwrap` | What `hush gh` covers, reading a `gh` command line, and the one launch of `gh`; CLI only |
 | `internal/leakcheck` | Synthetic terms and tokens, and the leak check every test uses |
+| `internal/schema` | The closed check of ADR-001 section 6.3's JSON document; tests only |
 
 ## Tests
 - Every test passes what it prints and every error it gets through `leakcheck.Check`.
@@ -86,4 +87,6 @@ is a port of `reference/interim-hush/` at parity, and everything is internal.
   configuration and points `HOME` at a temporary directory; `go doc` shows its runnable examples.
 - Synthetic strings come from `internal/leakcheck`, assembled at run time, so sources scan clean.
 - A change to scanning behaviour keeps `TestParity` passing, or lists the intended difference
-  in the PR.
+  in the PR. `TestParity` maps the interim's arguments as ADR-001's Consequences table says and
+  compares exit status and standard output; standard error is checked against the message table.
+- A JSON document a test prints passes `schema.CheckLine`.

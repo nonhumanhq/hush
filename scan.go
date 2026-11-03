@@ -41,13 +41,15 @@ func recoverError(err *error, reset func()) {
 type run struct {
 	s        *Scanner
 	ctx      context.Context
+	target   Target
 	t        *target.Scan
 	findings []Finding
 	bad      bool // the output check refused a finding
 }
 
-// start checks s and ctx and returns a run whose target scan reports to it.
-func (s *Scanner) start(ctx context.Context) (*run, error) {
+// start checks s and ctx and returns a run of target t whose target scan
+// reports to it.
+func (s *Scanner) start(ctx context.Context, t Target) (*run, error) {
 	switch {
 	case !s.ready():
 		return nil, newError(CodeUsage, msgNoScanner, 0)
@@ -56,8 +58,9 @@ func (s *Scanner) start(ctx context.Context) (*run, error) {
 	case ctx.Err() != nil:
 		return nil, newError(CodeInterrupted, msgInterrupted, 0)
 	}
-	r := &run{s: s, ctx: ctx}
-	r.t = &target.Scan{Rules: *s.rules.get(), Sets: s.sets.get(), Apply: s.apply, Ctx: ctx, Sink: r.add}
+	r := &run{s: s, ctx: ctx, target: t}
+	r.t = &target.Scan{Rules: *s.rules.get(), Sets: s.sets.get(), Apply: s.apply, Ctx: ctx, Sink: r.add,
+		MaxFile: MaxInputSize, MaxLine: MaxLineSize, Unsafe: func(p string) bool { return unsafeAt(p) >= 0 }}
 	if s.terms != nil {
 		r.t.Terms = *s.terms.path.get()
 	}
@@ -89,7 +92,7 @@ func (r *run) finish(err error) (*Report, error) {
 		return nil, targetError(err)
 	}
 	rep := &Report{done: true, findings: r.findings, dest: r.s.dest, coverage: r.s.coverage,
-		sets: r.s.applied, counts: Counts(r.t.Counts)}
+		sets: r.s.applied, target: r.target, counts: Counts(r.t.Counts)}
 	if len(rep.findings) > 0 {
 		return rep, &FindingsError{report: rep}
 	}
@@ -110,8 +113,6 @@ func targetError(err error) *Error {
 	switch te.Kind {
 	case target.PathMissing:
 		return argError(CodePath, msgPathMissing, te.Arg)
-	case target.PathUnwalkable:
-		return argError(CodePath, msgPathUnwalkable, te.Arg)
 	case target.PathUnresolved:
 		return argError(CodePath, msgPathUnresolved, te.Arg)
 	case target.TermFileInside:
@@ -130,24 +131,43 @@ func targetError(err error) *Error {
 		return newError(CodeRead, msgStdinUnreadable, 0)
 	case target.Interrupted:
 		return newError(CodeInterrupted, msgInterrupted, 0)
+	case target.TooLarge:
+		return newError(CodeRead, msgTooLarge, 0)
+	case target.TermFileGone:
+		return newError(CodeTermFile, msgTermMissing, 0)
 	}
 	return errInternal()
 }
 
 // checkLabel returns the label findings in a buffer carry: "<stdin>" for "",
 // and otherwise label itself once it matches [A-Za-z0-9][A-Za-z0-9._-]{0,63},
-// contains no term of any loaded set (ignoring ASCII case) and breaks no
-// generic rule as a bare string. A refused label is ErrLabel, never echoed.
+// contains no term of any loaded set (ignoring ASCII case), is not a client
+// label any set declares (ignoring ASCII case) and breaks no generic rule as
+// a bare string. A refused label is ErrLabel, never echoed.
 func (s *Scanner) checkLabel(label string) (string, error) {
 	if label == "" {
 		return "<stdin>", nil
 	}
 	refused := !goodStdinLabel(label) || s.breaksText(label) ||
-		s.sets != nil && s.sets.get().RefusesName([]byte(label))
+		s.sets != nil && (s.sets.get().RefusesName([]byte(label)) || s.declaredLabel(label))
 	if refused {
 		return "", newError(CodeLabel, msgLabelRefused, 0)
 	}
 	return label, nil
+}
+
+// declaredLabel reports whether label equals, ignoring ASCII case, a client
+// label that any loaded set declares.
+func (s *Scanner) declaredLabel(label string) bool {
+	sets, lower := s.sets.get(), lowerASCII(label)
+	for i := 0; i < sets.Len(); i++ {
+		for _, l := range sets.Labels(i) {
+			if lowerASCII(l) == lower {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func goodStdinLabel(label string) bool {
@@ -171,10 +191,10 @@ func goodStdinLabel(label string) bool {
 // [A-Za-z0-9][A-Za-z0-9._-]{0,63} and hold no term and nothing a generic rule
 // flags (ErrLabel otherwise). Lines are split on "\n". Input that holds a NUL
 // byte is not scanned: it gives one binary-unscanned finding. Input over
-// MaxInputSize is ErrRead.
+// MaxInputSize, or a line over MaxLineSize, is ErrRead.
 func (s *Scanner) ScanBytes(ctx context.Context, label string, b []byte) (rep *Report, err error) {
 	defer recoverError(&err, func() { rep = nil })
-	r, err := s.start(ctx)
+	r, err := s.start(ctx, TargetStdin)
 	if err != nil {
 		return nil, err
 	}
@@ -185,14 +205,14 @@ func (s *Scanner) ScanBytes(ctx context.Context, label string, b []byte) (rep *R
 		return nil, newError(CodeRead, msgTooLarge, 0)
 	}
 	r.t.Buffer(b, label)
-	return r.finish(nil)
+	return r.finish(r.t.Err())
 }
 
 // ScanReader reads rd to its end and scans what it read as ScanBytes does. A
 // read error is ErrRead, and so is a stream over MaxInputSize.
 func (s *Scanner) ScanReader(ctx context.Context, label string, rd io.Reader) (rep *Report, err error) {
 	defer recoverError(&err, func() { rep = nil })
-	if _, err := s.start(ctx); err != nil {
+	if _, err := s.start(ctx, TargetStdin); err != nil {
 		return nil, err
 	}
 	if _, err := s.checkLabel(label); err != nil {
@@ -216,11 +236,16 @@ func (s *Scanner) ScanReader(ctx context.Context, label string, rd io.Reader) (r
 // text without being followed. With no paths it scans the whole of root, and
 // findings' paths are relative to root. Otherwise each path is opened below
 // root (or as given, when absolute), and findings' paths start with the path
-// as given. A path argument that does not exist is ErrPath; a path argument
-// that holds the term file is ErrTermFile.
+// as given. A file that cannot be read, a FIFO, socket or device, and a
+// directory that cannot be walked each give an unreadable finding, and the
+// rest is scanned; a path that cannot print safely gives unreadable in path,
+// and its content is still scanned. A path argument that does not exist is
+// ErrPath; a path argument that holds the term file, by any name or hard
+// link, is ErrTermFile, before any file is read; a file over MaxInputSize or
+// a line over MaxLineSize is ErrRead.
 func (s *Scanner) ScanTree(ctx context.Context, root string, paths ...string) (rep *Report, err error) {
 	defer recoverError(&err, func() { rep = nil })
-	r, err := s.start(ctx)
+	r, err := s.start(ctx, TargetTree)
 	if err != nil {
 		return nil, err
 	}
@@ -239,10 +264,11 @@ func (s *Scanner) ScanTree(ctx context.Context, root string, paths ...string) (r
 // ScanIndex scans the git index of repo: each stage's entry path and the blob
 // it names, read by object id through git plumbing, never from the work tree.
 // Paths are relative to the top of the work tree. A missing repository is
-// ErrGit, and so is a set IndexFile that is not a regular file.
+// ErrGit, and so is a set IndexFile that is not a regular file. A blob over
+// MaxInputSize or a line over MaxLineSize is ErrRead.
 func (s *Scanner) ScanIndex(ctx context.Context, repo Repo) (rep *Report, err error) {
 	defer recoverError(&err, func() { rep = nil })
-	r, err := s.start(ctx)
+	r, err := s.start(ctx, TargetIndex)
 	if err != nil {
 		return nil, err
 	}
@@ -264,10 +290,10 @@ func (s *Scanner) ScanIndex(ctx context.Context, repo Repo) (rep *Report, err er
 // author, committer and message, the paths it adds or changes and the lines
 // it adds, against its first parent. rg must pass the checks ParseRange makes
 // (ErrRange otherwise), and a range with no commits is ErrEmptyRange unless
-// rg.AllowEmpty is set.
+// rg.AllowEmpty is set. A line over MaxLineSize is ErrRead.
 func (s *Scanner) ScanRange(ctx context.Context, repo Repo, rg Range) (rep *Report, err error) {
 	defer recoverError(&err, func() { rep = nil })
-	r, err := s.start(ctx)
+	r, err := s.start(ctx, TargetRange)
 	if err != nil {
 		return nil, err
 	}

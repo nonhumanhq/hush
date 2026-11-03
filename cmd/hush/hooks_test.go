@@ -164,7 +164,7 @@ func TestHooksInstall(t *testing.T) {
 	code, out := h.run(repo, nil, h.hush, "hooks", "install")
 	h.expect("install", code, out, 0, installed)
 	for _, name := range hooks.Names {
-		if got := h.read(filepath.Join(repo, ".git", "hooks", name)); got != hooks.Script(name, h.hush, "") {
+		if got := h.read(filepath.Join(repo, ".git", "hooks", name)); got != hooks.Script(name, h.hush, "", "") {
 			t.Errorf("%s: unexpected script\n%s", name, got)
 		}
 	}
@@ -181,7 +181,7 @@ func TestHooksInstall(t *testing.T) {
 		repo = h.repo()
 		code, out = h.run(repo, []string{"PATH=" + profile + string(os.PathListSeparator) + os.Getenv("PATH")}, cmd[0], cmd[1:]...)
 		h.expect("install through a symlink", code, out, 0, installed)
-		if got := h.read(filepath.Join(repo, ".git", "hooks", "pre-push")); got != hooks.Script("pre-push", link, "") {
+		if got := h.read(filepath.Join(repo, ".git", "hooks", "pre-push")); got != hooks.Script("pre-push", link, "", "") {
 			t.Errorf("install through a symlink, %s: the hook does not run the symlink\n%s", cmd[0], got)
 		}
 	}
@@ -193,13 +193,13 @@ func TestHooksInstall(t *testing.T) {
 	h.write(other, "#!/bin/sh\nexit 0\n")
 	code, out = h.run(repo, nil, h.hush, "hooks", "install")
 	h.expect("install over another hook", code, out, 2,
-		"hush-interim: the pre-push hook was not written by hush (give --force to replace it)\n")
+		"hush: the pre-push hook was not written by hush (give --force to replace it)\n")
 	if _, err := os.Stat(filepath.Join(repo, ".git", "hooks", "pre-commit")); err == nil {
 		t.Error("a refused install wrote pre-commit")
 	}
 	code, out = h.run(repo, nil, h.hush, "hooks", "install", "--force")
 	h.expect("install --force", code, out, 0, installed)
-	if !strings.Contains(h.read(other), " scan --range ") {
+	if !strings.Contains(h.read(other), " --allow-empty-range --range ") {
 		t.Error("install --force left the other pre-push hook")
 	}
 
@@ -225,13 +225,13 @@ func TestHooksInstall(t *testing.T) {
 	sub := filepath.Join(repo, "docs")
 	h.write(filepath.Join(sub, "a.md"), "see "+lc.Bad+"\n")
 	code, out = h.run(sub, nil, h.hush, "hooks", "install")
-	h.expect("install into the work tree", code, out, 2, "hush-interim: the hooks directory is inside the work tree, "+
+	h.expect("install into the work tree", code, out, 2, "hush: the hooks directory is inside the work tree, "+
 		"and the hooks hold absolute paths that must not be committed (give --force to install them there)\n")
 	if _, err := os.Stat(filepath.Join(repo, ".githooks")); err == nil {
 		t.Error("a refused install created .githooks")
 	}
 	code, out = h.run(sub, nil, h.hush, "hooks", "install", "--force")
-	h.expect("install --force into the work tree", code, out, 0, installed+"hush-interim: warning: the hooks directory "+
+	h.expect("install --force into the work tree", code, out, 0, installed+"hush: warning: the hooks directory "+
 		"is inside the work tree; the hooks hold absolute paths and must not be committed\n")
 	if _, err := os.Stat(filepath.Join(repo, ".githooks", "pre-commit")); err != nil {
 		t.Error("install ignored core.hooksPath")
@@ -250,14 +250,14 @@ func TestHooksInstall(t *testing.T) {
 	code, out = h.run(bare, nil, h.hush, "hooks", "install")
 	h.expect("install in a bare repository", code, out, 0, installed)
 	code, out = h.run(filepath.Join(repo, ".git"), nil, h.hush, "hooks", "install")
-	h.expect("install inside the git directory", code, out, 2, "hush-interim: cannot find the work tree\n")
+	h.expect("install inside the git directory", code, out, 2, "hush: cannot find the work tree\n")
 
 	outside := filepath.Join(h.root, "outside")
 	if err := os.Mkdir(outside, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	code, out = h.run(outside, nil, h.hush, "hooks", "install")
-	h.expect("install outside a repository", code, out, 2, "hush-interim: not a git repository\n")
+	h.expect("install outside a repository", code, out, 2, "hush: not a git repository\n")
 }
 
 func TestHooksBlock(t *testing.T) {
@@ -394,7 +394,7 @@ func TestHooksBlock(t *testing.T) {
 	for i, obj := range []string{blob, tree} {
 		ref := "refs/tags/o" + strconv.Itoa(i)
 		code, out = h.run(repo, nil, "git", "push", "-q", "origin", obj+":"+ref)
-		if code == 0 || !strings.HasPrefix(out, "hush-interim: a pushed ref does not point to a commit, so hush cannot scan it\n") {
+		if code == 0 || !strings.HasPrefix(out, "hush: a pushed ref does not point to a commit, so hush cannot scan it\n") {
 			t.Errorf("push of a %s: exit %d, output %q", []string{"blob", "tree"}[i], code, out)
 		}
 		absent("push of a blob or a tree", remote, ref)
@@ -403,7 +403,7 @@ func TestHooksBlock(t *testing.T) {
 	// hook turns replace refs off, and git sends the blob itself.
 	h.git(repo, "replace", "-f", blob, h.git(repo, "rev-parse", "HEAD"))
 	code, out = h.run(repo, nil, "git", "push", "-q", "origin", blob+":refs/tags/o2")
-	if code == 0 || !strings.HasPrefix(out, "hush-interim: a pushed ref does not point to a commit, so hush cannot scan it\n") {
+	if code == 0 || !strings.HasPrefix(out, "hush: a pushed ref does not point to a commit, so hush cannot scan it\n") {
 		t.Errorf("push of a blob that a replace ref makes a commit: exit %d, output %q", code, out)
 	}
 	absent("push of a blob that a replace ref makes a commit", remote, "refs/tags/o2")
@@ -561,7 +561,12 @@ func TestHooksTerms(t *testing.T) {
 	repo := h.repo()
 	h.git(repo, "remote", "add", "origin", remote)
 	code, out := h.run(repo, nil, h.hush, "hooks", "install", "--terms", "missing.txt")
-	h.expect("install with a missing term file", code, out, 2, "hush-interim: term file missing or unreadable\n")
+	h.expect("install with a missing term file", code, out, 2, "hush: term file: missing or unreadable\n")
+	code, out = h.run(repo, nil, h.hush, "hooks", "install", "--terms", "../terms.txt")
+	h.expect("install with a term file others can read", code, out, 2, "hush: term file: readable or writable by group or others\n")
+	if err := os.Chmod(terms, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	code, out = h.run(repo, nil, h.hush, "hooks", "install", "--terms", "../terms.txt") // made absolute
 	h.expect("install --terms", code, out, 0, installed)
 	for _, name := range hooks.Names {
@@ -609,9 +614,10 @@ func TestPreCommitIndexFile(t *testing.T) {
 	if os.Mkdir(dir, 0o755) != nil || syscall.Mkfifo(fifo, 0o644) != nil || os.Symlink("none", dangling) != nil {
 		t.Fatal("setup failed")
 	}
-	const notFile = "hush-interim: GIT_INDEX_FILE does not name a regular file\n"
+	// An empty value names the working directory, so it is refused too.
+	const notFile = "hush: the index file is missing or not a regular file\n"
 	for _, c := range []struct{ what, value, want string }{
-		{"empty", "", "hush-interim: GIT_INDEX_FILE is set but empty\n"},
+		{"empty", "", notFile},
 		{"missing file", filepath.Join(h.root, "missing"), notFile},
 		{"dangling symlink", dangling, notFile},
 		{"directory", dir, notFile},
@@ -641,6 +647,16 @@ func TestPreCommitIndexFile(t *testing.T) {
 	}
 	code, out = h.run(sub, []string{"GIT_INDEX_FILE=../.git/index"}, hook)
 	h.expect("a relative index from a subdirectory", code, out, 1, "a.md:1: id-prefix\n")
+	// An index other than the repository's own: git must read the one named,
+	// so the finding is in b.md, which only that index stages. Every case
+	// above names the repository's own index, which git reads by default.
+	other := filepath.Join(h.root, "other-index")
+	h.write(filepath.Join(repo, "b.md"), "see "+lc.Bad+"\n")
+	if code, out := h.run(repo, []string{"GIT_INDEX_FILE=" + other}, "git", "add", "b.md"); code != 0 {
+		t.Fatalf("git add: %s", out)
+	}
+	code, out = h.run(repo, []string{"GIT_INDEX_FILE=" + other}, hook)
+	h.expect("another index", code, out, 1, "b.md:1: id-prefix\n")
 }
 
 func TestHooksArguments(t *testing.T) {
@@ -651,14 +667,22 @@ func TestHooksArguments(t *testing.T) {
 		out, error string
 	}{
 		{[]string{"hooks", "--help"}, 0, hooksUsage, ""},
-		{[]string{"hooks"}, 2, "", "hush-interim: hooks needs install, uninstall or pre-commit (see hush hooks --help)\n"},
-		{[]string{"hooks", lc.Client}, 2, "", "hush-interim: hooks needs install, uninstall or pre-commit (see hush hooks --help)\n"},
-		{[]string{"hooks", "install", "--terms"}, 2, "", "hush-interim: hooks install: unexpected argument 2 (see hush hooks --help)\n"},
-		{[]string{"hooks", "install", "--force", "--force"}, 2, "", "hush-interim: hooks install: unexpected argument 3 (see hush hooks --help)\n"},
-		{[]string{"hooks", "install", "--terms", ""}, 2, "", "hush-interim: term file missing or unreadable\n"},
-		{[]string{"hooks", "uninstall", "--terms", "t"}, 2, "", "hush-interim: hooks uninstall: unexpected argument 2 (see hush hooks --help)\n"},
-		{[]string{"hooks", "pre-commit", "--force"}, 2, "", "hush-interim: hooks pre-commit: unexpected argument 2 (see hush hooks --help)\n"},
-		{[]string{"hooks", "pre-commit", lc.Bad}, 2, "", "hush-interim: hooks pre-commit: unexpected argument 2 (see hush hooks --help)\n"},
+		{[]string{"hooks"}, 2, "", "hush: hooks needs install or uninstall (see hush hooks --help)\n"},
+		{[]string{"hooks", lc.Client}, 2, "", "hush: hooks needs install or uninstall (see hush hooks --help)\n"},
+		{[]string{"hooks", "pre-commit"}, 2, "", "hush: hooks needs install or uninstall (see hush hooks --help)\n"},
+		{[]string{"hooks", "install", "--terms"}, 2, "", "hush: hooks install: unexpected argument 2 (see hush hooks --help)\n"},
+		{[]string{"hooks", "install", "--force", "--force"}, 2, "", "hush: hooks install: unexpected argument 3 (see hush hooks --help)\n"},
+		{[]string{"hooks", "install", "--terms", ""}, 2, "", "hush: term file: missing or unreadable\n"},
+		{[]string{"hooks", "uninstall", "--terms", "t"}, 2, "", "hush: hooks uninstall: unexpected argument 2 (see hush hooks --help)\n"},
+		{[]string{"hooks", "uninstall", "--identities", lc.Identity}, 2, "", "hush: hooks uninstall: unexpected argument 2 (see hush hooks --help)\n"},
+		// --identities is checked as hush scan checks it, before anything
+		// is written, and cited by position (HSH-11/D24).
+		{[]string{"hooks", "install", "--identities", ""}, 2, "", "hush: argument 3: identities: address 1 is malformed\n"},
+		{[]string{"hooks", "install", "--force", "--identities", lc.Identity + ",<" + lc.Identity2}, 2, "",
+			"hush: argument 4: identities: address 2 is malformed\n"},
+		{[]string{"hooks", "install", "--identities", lc.Identity, "--identities", lc.Identity}, 2, "",
+			"hush: hooks install: unexpected argument 4 (see hush hooks --help)\n"},
+		{[]string{"hooks", "install", "--identities"}, 2, "", "hush: hooks install: unexpected argument 2 (see hush hooks --help)\n"},
 	} {
 		var out, errs strings.Builder
 		code := run(c.args, strings.NewReader(""), &out, &errs)

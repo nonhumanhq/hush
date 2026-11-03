@@ -50,6 +50,15 @@ type Scan struct {
 	// IndexFile is the absolute path of the index file Index reads, or "" for
 	// the one git finds itself (HSH-9/D5).
 	IndexFile string
+	// MaxFile and MaxLine, when not 0, are the largest file or blob and the
+	// longest line the scan reads, in bytes. More stops the scan with
+	// TooLarge; nothing is skipped (HSH-11/D4).
+	MaxFile, MaxLine int
+	// Unsafe, when set, reports whether a path cannot print safely. Such a
+	// path also gives "unreadable" in path at line 0 (ADR-001 section 5).
+	Unsafe func(path string) bool
+
+	failed error // TooLarge, once a line is over MaxLine
 
 	every termset.Mask // every set in Sets, once computed
 }
@@ -131,8 +140,16 @@ func (s *Scan) text(at Finding, data []byte, ctx rule.Context) {
 	}
 }
 
-// emit reports the rules and sets one line breaks, at the place at.
+// emit reports the rules and sets one line breaks, at the place at. A line
+// over MaxLine is not checked: it sets the scan's error, which the target
+// returns.
 func (s *Scan) emit(at Finding, ln int, line string, ctx rule.Context) {
+	if s.MaxLine > 0 && len(line) > s.MaxLine {
+		if s.failed == nil {
+			s.failed = fail(TooLarge, "input over the size limit")
+		}
+		return
+	}
 	s.Counts.Lines++
 	at.Line = ln
 	for _, name := range s.check([]byte(line), ctx) {
@@ -141,14 +158,23 @@ func (s *Scan) emit(at Finding, ln int, line string, ctx rule.Context) {
 	}
 }
 
-// path reports the rules and sets at.Path breaks, at line 0.
+// path reports the rules and sets at.Path breaks, at line 0, and then
+// "unreadable" when the path cannot print safely.
 func (s *Scan) path(at Finding) {
 	at.Line, at.InPath = 0, true
 	for _, name := range s.check([]byte(at.Path), pathContext(at.Path)) {
 		at.Rule = name
 		s.report(at)
 	}
+	if s.Unsafe != nil && s.Unsafe(at.Path) {
+		at.Rule = "unreadable"
+		s.report(at)
+	}
 }
+
+// Err returns the error a line over MaxLine set, or nil. Buffer, which
+// returns nothing, leaves it for its caller.
+func (s *Scan) Err() error { return s.failed }
 
 // unscanned reports that the file at at was not scanned, as rule
 // "binary-unscanned" or "unreadable".

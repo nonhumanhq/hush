@@ -22,13 +22,13 @@ func scanWithTerms(t *testing.T, file string) (int, string, string) {
 		t.Fatal(err)
 	}
 	var out, errs strings.Builder
-	code := run([]string{"scan", "--terms", terms, tree}, strings.NewReader(""), &out, &errs)
+	code := run([]string{"scan", "--destination", "public", "--terms", terms, tree}, strings.NewReader(""), &out, &errs)
 	lc.Check(t, out.String(), errs.String())
 	return code, out.String(), errs.String()
 }
 
 // ADR-002 negative test 6: the load-time checks of section 1.4, run by the
-// CLI's term loader in this part of HSH-11 (HSH-11/D12).
+// CLI through hush.LoadTermSets (HSH-11/D12).
 func TestNegative6LoadTimeRefusals(t *testing.T) {
 	q, z, a := lc.Quorvel, lc.Zantoph, lc.QVL
 	for i, c := range []struct {
@@ -48,7 +48,7 @@ func TestNegative6LoadTimeRefusals(t *testing.T) {
 		{"[" + q + "]\n" + q + "\n[b]\n", "line 3: set has no terms"},
 	} {
 		code, out, errs := scanWithTerms(t, c.file)
-		if want := "hush-interim: term file: " + c.want + "\n"; code != 2 || out != "" || errs != want {
+		if want := "hush: term file: " + c.want + "\n"; code != 2 || out != "" || errs != want {
 			t.Errorf("case %d: exit %d, stdout %d bytes, stderr %q, want %q", i, code, len(out), errs, want)
 		}
 	}
@@ -78,7 +78,7 @@ func TestTermFileRefusalsThroughTheCLI(t *testing.T) {
 		{"\n# " + q + "\n\n", "term file holds no terms"},
 	} {
 		code, out, errs := scanWithTerms(t, c.file)
-		if code != 2 || out != "" || errs != "hush-interim: "+c.want+"\n" {
+		if code != 2 || out != "" || errs != "hush: "+c.want+"\n" {
 			t.Errorf("case %d: exit %d, stdout %d bytes, stderr %q", i, code, len(out), errs)
 		}
 	}

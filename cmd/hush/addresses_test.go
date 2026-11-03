@@ -27,13 +27,13 @@ func TestScanRunsTheAddressRulesBeforeTheSets(t *testing.T) {
 		code  int
 		stdin string
 	}{
-		{"clean", []string{"scan", "--stdin"}, "see 192.0.2.10 and alice@example.com, HSH-14\n", 0, ""},
-		{"ip", []string{"scan", "--stdin"}, "at " + ip + "\n", 1, "<stdin>:1: ip-address\n"},
-		{"email", []string{"scan", "--stdin", "--label", "body"}, "mail " + mail + "\n", 1, "body:1: email-address\n"},
-		{"order", []string{"scan", "--stdin"}, line, 1, "<stdin>:1: id-prefix\n<stdin>:1: ip-address\n<stdin>:1: email-address\n"},
-		{"order with sets", []string{"scan", "--terms", terms, "--stdin"}, line, 1,
+		{"clean", []string{"scan", "--destination", "public", "--generic-only", "--stdin"}, "see 192.0.2.10 and alice@example.com, HSH-14\n", 0, ""},
+		{"ip", []string{"scan", "--destination", "public", "--generic-only", "--stdin"}, "at " + ip + "\n", 1, "<stdin>:1: ip-address\n"},
+		{"email", []string{"scan", "--destination", "public", "--generic-only", "--stdin", "--label", "body"}, "mail " + mail + "\n", 1, "body:1: email-address\n"},
+		{"order", []string{"scan", "--destination", "public", "--generic-only", "--stdin"}, line, 1, "<stdin>:1: id-prefix\n<stdin>:1: ip-address\n<stdin>:1: email-address\n"},
+		{"order with sets", []string{"scan", "--destination", "public", "--terms", terms, "--stdin"}, line, 1,
 			"<stdin>:1: id-prefix\n<stdin>:1: ip-address\n<stdin>:1: email-address\n<stdin>:1: set:clients\n"},
-		{"a line each", []string{"scan", "--stdin"}, "ok\n" + ip + "\n" + mail + "\nok\n", 1, "<stdin>:2: ip-address\n<stdin>:3: email-address\n"},
+		{"a line each", []string{"scan", "--destination", "public", "--generic-only", "--stdin"}, "ok\n" + ip + "\n" + mail + "\nok\n", 1, "<stdin>:2: ip-address\n<stdin>:3: email-address\n"},
 	} {
 		var out, errs strings.Builder
 		code := run(c.args, strings.NewReader(c.in), &out, &errs)
@@ -55,7 +55,7 @@ func TestScanTreeRedactsAnAddressInAPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out, errs strings.Builder
-	code := run([]string{"scan", "docs"}, strings.NewReader(""), &out, &errs)
+	code := run([]string{"scan", "--destination", "public", "--generic-only", "docs"}, strings.NewReader(""), &out, &errs)
 	want := "docs/<redacted>:0: ip-address in path\ndocs/<redacted>:1: email-address\n"
 	if code != 1 || out.String() != want || errs.Len() != 0 {
 		t.Errorf("exit %d, stdout %q, stderr %d bytes", code, out.String(), errs.Len())
