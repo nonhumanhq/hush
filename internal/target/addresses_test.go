@@ -19,18 +19,21 @@ import (
 // the ip-address and email-address rules run in every target, through the
 // registry, and a finding never prints what it matched.
 
-// addrRow is a flagged row of ADR-002 sections 4.2 and 4.3 and the rule it
-// breaks. With no allowance, every row of both tables is flagged in every
-// target (the targets pass the zero context, ADR-002 section 5.1).
-type addrRow struct{ line, rule string }
+// flaggedRow is a flagged row of ADR-002 sections 4.1, 4.2 and 4.3 and the
+// rule it breaks. With no allowance, and outside reference/, every row of the
+// three tables is flagged in every target.
+type flaggedRow struct{ line, rule string }
 
-func addrRows() []addrRow {
-	var rows []addrRow
+func flaggedRows() []flaggedRow {
+	var rows []flaggedRow
 	for _, l := range lc.IPFlagged {
-		rows = append(rows, addrRow{l, "ip-address"})
+		rows = append(rows, flaggedRow{l, "ip-address"})
 	}
 	for _, l := range lc.EmailFlagged {
-		rows = append(rows, addrRow{l, "email-address"})
+		rows = append(rows, flaggedRow{l, "email-address"})
+	}
+	for _, l := range lc.IDFlagged {
+		rows = append(rows, flaggedRow{l, "id-prefix"})
 	}
 	return rows
 }
@@ -49,6 +52,7 @@ func gitRepo(t *testing.T) (string, func(args ...string) string) {
 	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(outside))
+	t.Setenv("HOME", outside)
 	for _, k := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -84,7 +88,7 @@ func rulesOf(out string) []string {
 	return got
 }
 
-func wantRules(rows []addrRow) []string {
+func wantRules(rows []flaggedRow) []string {
 	var want []string
 	for _, r := range rows {
 		want = append(want, r.rule)
@@ -113,7 +117,7 @@ func lineNumbers(out string) []int {
 // staged blob, standard input and the lines of a commit, with the line it is
 // on, and nothing it matched is printed.
 func TestAddressRowsAreFlaggedInEveryTarget(t *testing.T) {
-	rows := addrRows()
+	rows := flaggedRows()
 	text := make([]string, len(rows))
 	for i, r := range rows {
 		text[i] = r.line
@@ -216,25 +220,26 @@ func TestAddressRowsAreFlaggedInEveryTarget(t *testing.T) {
 // that holds a quote or a backslash is a path git quotes in a diff (the range
 // target's known gap, HSH-5/D7), so the range target skips the last two.
 func TestAddressRowsAsPaths(t *testing.T) {
-	rows := addrRows()
+	rows := flaggedRows()
 	list := rule.Registry(nil)
 	// expected is what a target must print for the file path p reported as
 	// where, without the directory the scan started from.
 	expected := func(p string, escaped bool) string {
 		var b strings.Builder
-		where := list.Redact(p, rule.InRef(p))
+		ctx := rule.Context{Source: rule.Path, Path: p}
+		where := rule.Redact(p, list.Start([]byte(p), ctx))
 		if escaped {
 			where = escape(where)
 		}
-		for _, name := range list.Check(p, rule.InRef(p)) {
+		for _, name := range list.Check([]byte(p), ctx) {
 			fmt.Fprintf(&b, "%s:0: %s in path\n", where, name)
 		}
 		return b.String()
 	}
-	rowPath := func(i int, r addrRow) string { return fmt.Sprintf("p%03d/%s/x.txt", i, r.line) }
+	rowPath := func(i int, r flaggedRow) string { return fmt.Sprintf("p%03d/%s/x.txt", i, r.line) }
 	// The rule finds each row in the path it makes, with its own rule.
 	for i, r := range rows {
-		if p := filepath.ToSlash(filepath.Clean(rowPath(i, r))); !slices.Contains(list.Check(p, false), r.rule) {
+		if p := filepath.ToSlash(filepath.Clean(rowPath(i, r))); !slices.Contains(list.Check([]byte(p), rule.Context{Source: rule.Path, Path: p}), r.rule) {
 			t.Fatalf("row %d is not flagged as a path", i)
 		}
 	}
@@ -380,10 +385,11 @@ func TestAddressRulesFeedRedaction(t *testing.T) {
 	}
 }
 
-// Negative test 4, as far as the targets go before HSH-11: no scan applies the
-// identity allowance, so a commit that carries an identity outside the reserved
-// domains is flagged on its author, committer and trailer lines, whatever a
-// file in the repository, .mailmap, git's configuration or the environment says,
+// Negative test 4, as far as the targets go without an allowance (the CLI's
+// --identities comes in a later part of HSH-11): a commit that carries an
+// identity outside the reserved domains is flagged on its author, committer
+// and trailer lines, whatever a file in the repository, .mailmap, git's
+// configuration or the environment says,
 // and the trailer is flagged on standard input as the commit-msg hook passes it.
 func TestCommitIdentityIsFlaggedWhateverTheRepositorySays(t *testing.T) {
 	dir, git := gitRepo(t)

@@ -48,9 +48,8 @@ func TestRegistryPassesTheAllowance(t *testing.T) {
 	if broken(email, lc.TrailerLine, inMessage) || !broken(email, lc.TrailerLine, inFile) {
 		r.errorf("the registry's email rule does not apply the allowance as listed")
 	}
-	// The list's own checks pass the zero context, which is no identity position
-	// (ADR-002 section 5.1), so no scan applies the allowance before HSH-11.
-	if got := strings.Join(l.Check(lc.TrailerLine, false), ","); got != "email-address" {
+	// The zero context, Text, is no identity position (ADR-002 section 5.1).
+	if got := strings.Join(l.Check([]byte(lc.TrailerLine), Context{}), ","); got != "email-address" {
 		r.errorf("a rule list with the allowance gives %q for the trailer line", got)
 	}
 	if got := Registry(nil)[2].(EmailAddress); len(got.ids) != 0 {
@@ -64,13 +63,13 @@ func TestRegistryOrdersFindings(t *testing.T) {
 	r := newReport(t)
 	defer r.done()
 	line := "bob@" + "acme.local" + " " + "10.1." + "2.3" + " " + lc.Bad
-	if got := strings.Join(Registry(nil).Check(line, false), ","); got != "id-prefix,ip-address,email-address" {
+	if got := strings.Join(Registry(nil).Check([]byte(line), Context{}), ","); got != "id-prefix,ip-address,email-address" {
 		r.errorf("findings are %q", got)
 	}
-	if got := strings.Join(Registry(nil).Check(line+line, false), ","); got != "id-prefix,ip-address,email-address" {
+	if got := strings.Join(Registry(nil).Check([]byte(line+line), Context{}), ","); got != "id-prefix,ip-address,email-address" {
 		r.errorf("a line gives more than one finding per rule: %q", got)
 	}
-	lc.Check(t, strings.Join(Registry(nil).Check(line, false), ","))
+	lc.Check(t, strings.Join(Registry(nil).Check([]byte(line), Context{}), ","))
 }
 
 // Nothing is read from a file, git configuration, .mailmap, the environment or

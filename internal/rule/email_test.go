@@ -78,9 +78,9 @@ func TestEmailAddressFlagged(t *testing.T) {
 	}
 }
 
-// Index is HSH-5's method over the same check, with the zero Context, which is
-// no identity position: even a rule built with the allowance flags the identity.
-func TestEmailAddressIndex(t *testing.T) {
+// A bare string, a file's line and a path are no identity position: even a
+// rule built with the allowance flags the identity there.
+func TestEmailAddressOutsideIdentityPositions(t *testing.T) {
 	r := newReport(t)
 	defer r.done()
 	if got := (EmailAddress{}).Name(); got != "email-address" {
@@ -93,9 +93,9 @@ func TestEmailAddressIndex(t *testing.T) {
 			want = start
 		}
 		for _, e := range []EmailAddress{{}, allowance} {
-			for _, inRef := range []bool{false, true} {
-				if got := e.Index(line, inRef); got != want {
-					r.errorf("row %d: Index(inRef %t) = %d, want %d", i, inRef, got, want)
+			for _, ctx := range []Context{{}, {Source: File, Path: "reference/a.md"}, {Source: Path, Path: "a"}} {
+				if got, b := e.Check([]byte(line), ctx); b && got != want || !b && want != -1 {
+					r.errorf("row %d: a file or path context gives %d, want %d", i, got, want)
 				}
 			}
 		}
@@ -364,7 +364,7 @@ func TestEmailAddressRedactsPaths(t *testing.T) {
 		{"docs/<bob@" + "buildhost>/a.md", "docs/<redacted>"},
 		{"docs/" + "bob@" + "acme.internal" + "/x-" + "bob@" + "acme.internal" + ".md", "docs/<redacted>"}, // two: from the first
 	} {
-		got := registry.Redact(c.path, false)
+		got := Redact(c.path, registry.Start([]byte(c.path), Context{Source: Path, Path: c.path}))
 		if got != c.want {
 			r.errorf("path %d redacts to %d bytes, want %d", i, len(got), len(c.want))
 		}

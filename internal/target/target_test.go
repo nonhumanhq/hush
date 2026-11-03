@@ -22,11 +22,7 @@ func scanner(t *testing.T, file string, out *strings.Builder) *Scan {
 	if err != nil {
 		t.Fatal("parse failed")
 	}
-	s := &Scan{Rules: rule.List{rule.IDPrefix{}}, Out: output.New(out)}
-	for _, set := range sets {
-		s.Rules = append(s.Rules, set)
-	}
-	return s
+	return &Scan{Rules: rule.List{rule.IDPrefix{}}, Sets: sets, Out: output.New(out)}
 }
 
 func write(t *testing.T, dir, name, content string) {

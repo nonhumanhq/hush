@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-
-	"github.com/nonhumanhq/hush/internal/rule"
 )
 
 // Paths scans each path argument in turn, as found from the repository root.
@@ -47,13 +45,12 @@ func (s *Scan) Paths(paths []string) error {
 func (s *Scan) file(p string) error {
 	data, flag := read(p)
 	path := normalize(p)
-	inRef := rule.InRef(path)
-	where := s.Rules.Redact(path, inRef)
-	s.path(where, path, inRef)
+	where := s.redact(path)
+	s.path(where, path)
 	if flag != "" {
 		s.Out.Finding(where, 0, flag)
 	} else {
-		s.text(where, data, inRef)
+		s.text(where, data, fileContext(path))
 	}
 	return s.flush()
 }

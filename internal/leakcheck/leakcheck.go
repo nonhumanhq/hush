@@ -4,6 +4,7 @@
 package leakcheck
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -26,7 +27,7 @@ var (
 	Span    = SpanA + "/" + SpanB
 	words   = []string{Client, "brindle" + "wick", Person, SpanA, SpanB, EscA, EscB}
 	tokens  = []string{Bad, Near, Fleet, Vmws}
-	allText = append(append(append([]string{}, words...), tokens...), addresses...)
+	allText = slices.Concat(words, tokens, addresses, termWords)
 )
 
 // Terms holding characters git quotes in a path.

@@ -16,15 +16,6 @@ type IPAddress struct{}
 // Name returns "ip-address".
 func (IPAddress) Name() string { return "ip-address" }
 
-// Index returns the offset of the earliest flagged address in s, or -1. It
-// calls Check with the zero Context; inRef plays no part.
-func (r IPAddress) Index(s string, inRef bool) int {
-	if start, broken := r.Check([]byte(s), Context{}); broken {
-		return start
-	}
-	return -1
-}
-
 // Check reports whether line holds an address the rule flags and, if it does,
 // the offset where the earliest one begins. The context plays no part. It
 // keeps no reference to line.

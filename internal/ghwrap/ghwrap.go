@@ -16,7 +16,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/nonhumanhq/hush/internal/rule"
 	"github.com/nonhumanhq/hush/internal/target"
 )
 
@@ -134,7 +133,7 @@ type text struct {
 // scanned. It returns 1 on findings and otherwise gh's exit status. An error
 // is fixed text, and means exit 2: gh did not run, or did not exit normally.
 func Run(s *target.Scan, args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
-	c, err := prepare(args, stdin, s.Rules)
+	c, err := prepare(args, stdin, s.Breaks)
 	if err != nil {
 		return 2, err
 	}
@@ -174,7 +173,7 @@ func Run(s *target.Scan, args []string, stdin io.Reader, stdout, stderr io.Write
 
 // prepare reads args as gh would and returns the call to make and the texts to
 // scan first. Files and standard input are read here, once.
-func prepare(args []string, stdin io.Reader, rules rule.List) (*call, error) {
+func prepare(args []string, stdin io.Reader, breaks func(string) bool) (*call, error) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		return nil, errors.New("give a gh command after -- (see hush gh --help)")
 	}
@@ -183,13 +182,13 @@ func prepare(args []string, stdin io.Reader, rules rule.List) (*call, error) {
 		n = 1
 	}
 	if len(args) < n {
-		return nil, notCovered(args, rules)
+		return nil, notCovered(args, breaks)
 	}
 	if strings.HasPrefix(args[n-1], "-") {
 		if !isGroup(args[0]) {
-			return nil, notCovered(args[:1], rules)
+			return nil, notCovered(args[:1], breaks)
 		}
-		return nil, errors.New("gh " + named(args[:n-1], rules) + ": give the command before any flag (see hush gh --help)")
+		return nil, errors.New("gh " + named(args[:n-1], breaks) + ": give the command before any flag (see hush gh --help)")
 	}
 	cmd := strings.Join(args[:n], " ")
 	if readOnly[cmd] {
@@ -201,7 +200,7 @@ func prepare(args []string, stdin io.Reader, rules rule.List) (*call, error) {
 	}
 	spec, ok := tables[cmd]
 	if !ok {
-		return nil, notCovered(args[:n], rules)
+		return nil, notCovered(args[:n], breaks)
 	}
 	spec += " help"
 	if args[0] != "api" {
@@ -290,7 +289,7 @@ func prepare(args []string, stdin io.Reader, rules rule.List) (*call, error) {
 			}
 		case '~', '*':
 			key, v, _ := strings.Cut(value, "=")
-			where += " " + safe(key, rules)
+			where += " " + safe(key, breaks)
 			if f.kind == '*' && strings.HasPrefix(v, "@") {
 				data, err := read(v[1:], where)
 				if err != nil {
@@ -477,15 +476,15 @@ func isGroup(word string) bool {
 	return false
 }
 
-func notCovered(words []string, rules rule.List) error {
-	return errors.New("gh " + named(words, rules) + " is not covered by hush gh (see hush gh --help)")
+func notCovered(words []string, breaks func(string) bool) error {
+	return errors.New("gh " + named(words, breaks) + " is not covered by hush gh (see hush gh --help)")
 }
 
 // named returns words joined by spaces, each passed through safe.
-func named(words []string, rules rule.List) string {
+func named(words []string, breaks func(string) bool) string {
 	out := make([]string, len(words))
 	for i, w := range words {
-		out[i] = safe(w, rules)
+		out[i] = safe(w, breaks)
 	}
 	return strings.Join(out, " ")
 }
@@ -494,8 +493,8 @@ func named(words []string, rules rule.List) string {
 // breaks no rule, as a path component would print, and "<redacted>"
 // otherwise, so a message or location never echoes what a rule finds
 // (HSH-9/D8, D11).
-func safe(s string, rules rule.List) string {
-	if s == "" || len(s) > 64 || len(rules.Check(s, false)) > 0 {
+func safe(s string, breaks func(string) bool) string {
+	if s == "" || len(s) > 64 || breaks(s) {
 		return "<redacted>"
 	}
 	for _, c := range []byte(s) {

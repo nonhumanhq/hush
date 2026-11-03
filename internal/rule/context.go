@@ -27,9 +27,8 @@ const (
 	Stdin                // a line of standard input or of a caller's buffer
 )
 
-// Context is everything a rule may know about a line besides its bytes. No
-// target fills it before HSH-11 (ADR-002 section 5.1), so the rules' Index
-// methods pass the zero Context.
+// Context is everything a rule may know about a line besides its bytes. The
+// targets fill it for every line and path they scan (ADR-002 section 5.1).
 type Context struct {
 	Source Source
 	Path   string // for File and Path: the reported path before redaction (ADR-001 section 6.4 step 1)

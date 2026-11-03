@@ -44,7 +44,7 @@ func newParity(t *testing.T) *parity {
 	}
 	p := &parity{t: t, interim: interim, root: t.TempDir()}
 	p.hush = filepath.Join(t.TempDir(), "hush")
-	if out, err := exec.Command("go", "build", "-o", p.hush, ".").CombinedOutput(); err != nil {
+	if out, err := exec.Command("go", "build", "-buildvcs=false", "-o", p.hush, ".").CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 	for _, d := range []string{"home", "tmp"} {
@@ -147,6 +147,25 @@ func (p *parity) run(name string, code int, want string, args ...string) {
 	p.stdin, p.extra, p.stdout, p.shellLine = "", nil, nil, false
 }
 
+// differ is a case where hush differs from the interim scanner on purpose
+// (HSH-11/D13): each program must give exactly the result listed for it.
+func (p *parity) differ(name string, interim, hush result, args ...string) {
+	p.t.Run(name, func(t *testing.T) {
+		ref := p.exec("sh", append([]string{p.interim}, args...)...)
+		got := p.exec(p.hush, append([]string{"scan"}, args...)...)
+		if ref != interim {
+			t.Errorf("the interim scanner gives %+v, want %+v", ref, interim)
+		}
+		if got != hush {
+			t.Errorf("hush gives %+v, want %+v", got, hush)
+		}
+		lc.Check(t, ref.stdout, ref.stderr, got.stdout, got.stderr)
+	})
+}
+
+// fails is the result of an error exit with one error line.
+func fails(msg string) result { return result{2, "", "hush-interim: " + msg + "\n"} }
+
 func TestParity(t *testing.T) {
 	p := newParity(t)
 
@@ -163,6 +182,11 @@ func TestParity(t *testing.T) {
 	p.fresh()
 	p.write("docs/a.md", "first\nsecond\nthen "+lc.Bad+" here\n")
 	p.run("disallowed prefix fails", 1, "docs/a.md:3: id-prefix", ".")
+
+	// An intended difference: the widened prefix (ADR-002 section 4.1).
+	p.fresh()
+	p.write("a.md", "clean\nrefers to "+"AB1"+"-23"+"\n")
+	p.differ("prefix with a digit fails", result{}, result{1, "a.md:2: id-prefix\n", ""}, ".")
 
 	p.fresh()
 	p.write("a.md", "refers to "+lc.Near+"\n")
@@ -220,9 +244,21 @@ func TestParity(t *testing.T) {
 	p.write(empty, "# nothing but comments\n\n[people]\n")
 	p.write(nosection, lc.Person+"\n[clients]\n"+lc.Client+"\n")
 	p.write(badset, "[two words]\n"+lc.Client+"\n")
-	p.run("term file without terms fails", 2, "", "--terms", empty, ".")
-	p.run("term outside a section fails", 2, "", "--terms", nosection, ".")
-	p.run("bad set name fails", 2, "", "--terms", badset, ".")
+	// Intended differences: format 1 words these refusals as ADR-002 section
+	// 1.5 does, and refuses a set with no terms on its own line.
+	p.differ("term file without terms fails", fails("term file holds no terms"),
+		fails("term file: line 3: set has no terms"), "--terms", empty, ".")
+	p.differ("term outside a section fails", fails("term file: term outside a [set] section at line 1"),
+		fails("term file: line 1: term outside a set"), "--terms", nosection, ".")
+	p.differ("bad set name fails", fails("term file: bad set name at line 1"),
+		fails("term file: line 1: bad attribute"), "--terms", badset, ".")
+	// Intended differences: format 1's header attributes, which the interim
+	// refuses, and section 1.4's load-time checks, which it does not run.
+	options, refused := filepath.Join(p.root, "options.txt"), filepath.Join(p.root, "refused.txt")
+	p.write(options, "[clients match=word]\n"+lc.Client+"\n")
+	p.write(refused, "["+lc.Client+"-notes]\n"+lc.Client+"\n")
+	p.differ("header attributes load", fails("term file: bad set name at line 1"), result{}, "--terms", options, ".")
+	p.differ("a set name holding a term is refused", result{}, fails("term file: line 1: set name refused"), "--terms", refused, ".")
 	p.run("term file given twice fails", 2, "", "--terms", p.terms, "--terms", p.terms, ".")
 
 	p.fresh()

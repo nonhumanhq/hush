@@ -51,7 +51,7 @@ var ipPasses = []string{
 // test 3).
 var registry = Registry(nil)
 
-func names(line string) string { return strings.Join(registry.Check(line, false), ",") }
+func names(line string) string { return strings.Join(registry.Check([]byte(line), Context{}), ",") }
 
 // Each row of the Passes table, alone on a line, is flagged by no rule.
 func TestIPAddressPasses(t *testing.T) {
@@ -91,9 +91,8 @@ func TestIPAddressFlagged(t *testing.T) {
 	}
 }
 
-// Index is HSH-5's method over the same check, with the zero Context; inRef
-// plays no part.
-func TestIPAddressIndex(t *testing.T) {
+// The context plays no part in the ip-address rule's verdict.
+func TestIPAddressIgnoresTheContext(t *testing.T) {
 	r := newReport(t)
 	defer r.done()
 	if got := (IPAddress{}).Name(); got != "ip-address" {
@@ -105,10 +104,8 @@ func TestIPAddressIndex(t *testing.T) {
 		if broken {
 			want = start
 		}
-		for _, inRef := range []bool{false, true} {
-			if got := (IPAddress{}).Index(line, inRef); got != want {
-				r.errorf("row %d: Index(inRef %t) = %d, want %d", i, inRef, got, want)
-			}
+		if got, b := (IPAddress{}).Check([]byte(line), Context{Source: Path, Path: "reference/a"}); b != broken || got != want && b {
+			r.errorf("row %d: a path context gives %d, want %d", i, got, want)
 		}
 		for _, ctx := range []Context{{Source: File, Path: "reference/a.md"}, {Source: Stdin}, {Source: Object, Part: Message}} {
 			if s2, b2 := (IPAddress{}).Check([]byte(line), ctx); s2 != start || b2 != broken {
@@ -208,10 +205,10 @@ func TestIPAddressRedactsPaths(t *testing.T) {
 		{"docs/192.0.2.10/a.md", "docs/192.0.2.10/a.md"},
 		{"docs/" + "2001:db9:" + ":1" + "/a.md", "docs/<redacted>"},
 	} {
-		if got := registry.Redact(c.path, false); got != c.want {
+		if got := Redact(c.path, registry.Start([]byte(c.path), Context{Source: Path, Path: c.path})); got != c.want {
 			r.errorf("path %d redacts to %d bytes, want %d", i, len(got), len(c.want))
 		}
-		lc.Check(t, registry.Redact(c.path, false))
+		lc.Check(t, Redact(c.path, registry.Start([]byte(c.path), Context{Source: Path, Path: c.path})))
 	}
 }
 

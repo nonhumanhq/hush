@@ -104,16 +104,26 @@ func (s *Scan) Range(repo, revs string) error {
 }
 
 // commit scans a raw commit object. Only the author and committer header
-// lines are text; the rest of the header is hashes and signatures.
+// lines are text; the rest of the header is hashes and signatures. Each line
+// carries its part (ADR-002 section 5.1).
 func (s *Scan) commit(where string, obj []byte) {
 	body := false
 	for i, line := range lines(obj) {
+		ctx := rule.Context{Source: rule.Object}
 		switch {
-		case body || strings.HasPrefix(line, "author ") || strings.HasPrefix(line, "committer "):
-			s.emit(where, i+1, line, false)
+		case body:
+			ctx.Part = rule.Message
+		case strings.HasPrefix(line, "author "):
+			ctx.Part = rule.Author
+		case strings.HasPrefix(line, "committer "):
+			ctx.Part = rule.Committer
 		case line == "":
 			body = true
+			continue
+		default:
+			continue
 		}
+		s.emit(where, i+1, line, ctx)
 	}
 }
 
@@ -121,11 +131,11 @@ func (s *Scan) commit(where string, obj []byte) {
 // numbered in the new file. Deleted lines are not findings.
 func (s *Scan) diff(short string, data []byte) {
 	var file, path string
-	var inRef, pending, inHunk bool
+	var pending, inHunk bool
 	ln := 0
 	flush := func() {
 		if pending {
-			s.path(file, path, inRef)
+			s.path(file, path)
 		}
 		pending = false
 	}
@@ -140,15 +150,14 @@ func (s *Scan) diff(short string, data []byte) {
 			} else {
 				path = substr(rest, 3, (len(rest)-5)/2)
 			}
-			inRef = rule.InRef(path)
-			file = short + ":" + s.Rules.Redact(path, inRef)
+			file = short + ":" + s.redact(path)
 			pending, inHunk = true, false
 		case strings.HasPrefix(line, "@@ "):
 			flush()
 			inHunk, ln = true, hunkStart(line)
 		case inHunk:
 			if strings.HasPrefix(line, "+") {
-				s.emit(file, ln, line[1:], inRef)
+				s.emit(file, ln, line[1:], fileContext(path))
 				ln++
 			}
 		case strings.HasPrefix(line, "deleted file mode "):
@@ -238,9 +247,8 @@ func (s *Scan) Index(repo string) error {
 	}
 	r := bufio.NewReader(pipe)
 	for _, e := range entries {
-		inRef := rule.InRef(e.path)
-		where := escape(s.Rules.Redact(e.path, inRef))
-		s.path(where, e.path, inRef)
+		where := escape(s.redact(e.path))
+		s.path(where, e.path)
 		if e.mode == "160000" {
 			continue
 		}
@@ -253,7 +261,7 @@ func (s *Scan) Index(repo string) error {
 		if bytes.IndexByte(data, 0) >= 0 {
 			s.Out.Finding(where, 0, "binary-unscanned")
 		} else {
-			s.text(where, data, inRef) // a symlink's blob is its target text
+			s.text(where, data, fileContext(e.path)) // a symlink's blob is its target text
 		}
 	}
 	if c.Wait() != nil {

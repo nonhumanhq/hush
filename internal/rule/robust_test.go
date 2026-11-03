@@ -11,15 +11,11 @@ import (
 
 // checkLine holds what ADR-002 section 5.1 asks of any rule on any bytes: no
 // panic, an offset inside the line, a verdict that depends on the line and its
-// context alone, a line left as it was, and Index agreeing with Check on the
-// zero Context.
+// context alone, and a line left as it was.
 func checkLine(t *testing.T, line []byte) {
 	t.Helper()
 	orig := bytes.Clone(line)
-	for _, r := range []interface {
-		Index(string, bool) int
-		Check([]byte, Context) (int, bool)
-	}{IPAddress{}, EmailAddress{}, NewEmailAddress([]string{lc.Identity})} {
+	for _, r := range []Rule{IDPrefix{}, IPAddress{}, EmailAddress{}, NewEmailAddress([]string{lc.Identity})} {
 		start, b := r.Check(line, Context{})
 		again, b2 := r.Check(line, Context{})
 		if start != again || b != b2 {
@@ -27,13 +23,6 @@ func checkLine(t *testing.T, line []byte) {
 		}
 		if b && (start < 0 || start >= len(line)) || !b && start != -1 {
 			fatalf(t, "offset %d, flagged %t, on a line of %d bytes", start, b, len(line))
-		}
-		want := -1
-		if b {
-			want = start
-		}
-		if got := r.Index(string(line), false); got != want {
-			fatalf(t, "Index is %d, Check says %d, on a line of %d bytes", got, want, len(line))
 		}
 		for _, ctx := range []Context{{Source: Object, Part: Author}, {Source: Object, Part: Message}, {Source: Stdin}, {Source: File, Path: "a"}} {
 			if s, _ := r.Check(line, ctx); s < -1 || s >= len(line) && len(line) > 0 {

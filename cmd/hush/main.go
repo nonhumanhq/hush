@@ -177,9 +177,7 @@ parse:
 		if err != nil {
 			return fail(err.Error())
 		}
-		for _, set := range sets {
-			s.Rules = append(s.Rules, set)
-		}
+		s.Sets = sets
 	}
 	var err error
 	switch {
@@ -207,8 +205,11 @@ parse:
 // (HSH-9/D12).
 func genericRules() rule.List { return rule.Registry(nil) }
 
-// loadTerms reads and parses the term file named by --terms.
-func loadTerms(path string) ([]*termset.Set, error) {
+// loadTerms reads the term file named by --terms, parses it as format 1 and
+// runs ADR-002 section 1.4's load-time checks on its set names and client
+// labels: check 1, the terms, and check 2, the generic rules on the name as
+// written, as a bare string. Package hush takes these over (HSH-11/D12).
+func loadTerms(path string) (*termset.Sets, error) {
 	missing := errors.New("term file missing or unreadable")
 	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() {
 		return nil, missing
@@ -217,7 +218,16 @@ func loadTerms(path string) ([]*termset.Set, error) {
 	if err != nil {
 		return nil, missing
 	}
-	return termset.Parse(data)
+	sets, err := termset.Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	generic := rule.Registry(nil)
+	breaks := func(name []byte) bool { return len(generic.Check(name, rule.Context{Source: rule.Text})) > 0 }
+	if err := sets.CheckNames(breaks); err != nil {
+		return nil, err
+	}
+	return sets, nil
 }
 
 // version returns "hush", the module version and, when the build records

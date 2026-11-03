@@ -31,17 +31,6 @@ func NewEmailAddress(ids []string) EmailAddress {
 // Name returns "email-address".
 func (EmailAddress) Name() string { return "email-address" }
 
-// Index returns the offset of the earliest flagged address in s, or -1. It
-// calls Check with the zero Context, which is no identity position, so the
-// allowance never applies to a scan before HSH-11 (ADR-002 section 5.1); inRef
-// plays no part.
-func (e EmailAddress) Index(s string, inRef bool) int {
-	if start, broken := e.Check([]byte(s), Context{}); broken {
-		return start
-	}
-	return -1
-}
-
 var (
 	// bareAddress is the bare candidate pattern of section 4.3. [^\x00-\x7f]
 	// is any non-ASCII character; [\x80-\xff] would mean the runes U+0080 to

@@ -209,9 +209,7 @@ func newScan(terms string, out *output.Writer, stderr io.Writer) (*target.Scan, 
 		if err != nil {
 			return nil, err
 		}
-		for _, set := range sets {
-			s.Rules = append(s.Rules, set)
-		}
+		s.Sets = sets
 	}
 	return s, nil
 }

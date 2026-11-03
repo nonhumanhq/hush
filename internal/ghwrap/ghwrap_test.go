@@ -100,9 +100,7 @@ func scanner(t *testing.T, out io.Writer, terms bool) *target.Scan {
 		if err != nil {
 			t.Fatal("parse failed")
 		}
-		for _, set := range sets {
-			s.Rules = append(s.Rules, set)
-		}
+		s.Sets = sets
 	}
 	return s
 }
