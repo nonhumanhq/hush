@@ -3,19 +3,30 @@ package target
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
+
+// hookGit runs git for hush hooks, in the repository at repo ("" for the
+// current directory), with the caller's environment: unlike a scan, the
+// installer must see the caller's own configuration, where core.hooksPath is
+// often set (HSH-9/D3, HSH-11/D51). It returns git's standard output.
+func hookGit(repo string, args ...string) ([]byte, error) {
+	if repo != "" {
+		args = append([]string{"-C", repo}, args...)
+	}
+	return exec.Command("git", args...).Output()
+}
 
 // HooksDir returns the absolute path of the hooks directory of the repository
 // at repo ("" for the current directory). git resolves it, so it honours
 // core.hooksPath and linked worktrees (HSH-9/D3).
 func HooksDir(repo string) (string, error) {
-	g := git{dir: repo}
-	if err := g.check(); err != nil {
-		return "", err
+	if _, err := hookGit(repo, "rev-parse", "--git-dir"); err != nil {
+		return "", fail(NotRepository, "not a git repository")
 	}
-	out, err := g.out(false, "rev-parse", "--path-format=absolute", "--git-path", "hooks")
+	out, err := hookGit(repo, "rev-parse", "--path-format=absolute", "--git-path", "hooks")
 	dir := strings.TrimSuffix(string(out), "\n")
 	if err != nil || dir == "" {
 		return "", errors.New("cannot find the hooks directory")
@@ -29,15 +40,14 @@ func HooksDir(repo string) (string, error) {
 // be committed (HSH-9/D14). A bare repository has no work tree; anywhere else
 // that git finds none, such as inside the git directory, is an error.
 func InWorkTree(repo, path string) (bool, error) {
-	g := git{dir: repo}
-	top, err := g.out(false, "rev-parse", "--show-toplevel")
+	top, err := hookGit(repo, "rev-parse", "--show-toplevel")
 	if err != nil {
-		if bare, _ := g.out(false, "rev-parse", "--is-bare-repository"); string(bare) == "true\n" {
+		if bare, _ := hookGit(repo, "rev-parse", "--is-bare-repository"); string(bare) == "true\n" {
 			return false, nil
 		}
 		return false, errors.New("cannot find the work tree")
 	}
-	common, err := g.out(false, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	common, err := hookGit(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
 		return false, errors.New("cannot find the git directory")
 	}

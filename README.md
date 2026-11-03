@@ -34,7 +34,9 @@ hush hooks install [--terms FILE] [--identities ADDR]  # pre-commit, commit-msg 
 hush gh -- pr create -t TITLE -F body.md              # scan what gh would post, then run gh
 ```
 
-The hooks' git conditions arrive in HSH-11's part d; do not install them on a clone before v0.1.
+Git targets need git 2.44 or later, and run it with a fixed environment and no program a
+repository could configure (ADR-001 section 5). The hooks are not to be installed on a clone
+before v0.1, which brings `hush gh` under the same grammar.
 
 Exit status: 0 clean, 1 findings, 2 an error, with one line on standard error.
 

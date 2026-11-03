@@ -156,13 +156,18 @@ func (s *Scanner) finding(raw target.Finding) (f Finding, ok bool) {
 		if f.Part == 0 {
 			return Finding{}, false
 		}
+	case target.InTag:
+		f.Tag, f.Part = raw.Tag, part(raw.Part)
+		if f.Part == 0 {
+			return Finding{}, false
+		}
 	case target.InDiff:
 		f.Commit = raw.Commit
 		f.Path, f.PathRedacted = s.redact(raw.Path)
 	default:
 		return Finding{}, false
 	}
-	if raw.Loc != target.InStdin && raw.Loc != target.InCommit && f.Path == "" {
+	if (raw.Loc == target.InTree || raw.Loc == target.InIndex || raw.Loc == target.InDiff) && f.Path == "" {
 		return Finding{}, false
 	}
 	return f, true

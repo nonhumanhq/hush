@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -205,7 +206,7 @@ func (p *process) scanCommand(ctx context.Context, args []string) int {
 			err = e.WithArgument(len(args) - len(a.paths) + e.Argument())
 		}
 	case hush.TargetIndex:
-		rep, err = s.ScanIndex(ctx, hush.Repo{Dir: dir, IndexFile: indexFile()})
+		rep, err = s.ScanIndex(ctx, hush.Repo{Dir: gitDir(dir), IndexFile: indexFile()})
 	case hush.TargetRange:
 		var rg hush.Range
 		if rg, err = hush.ParseRange(a.rng.value); err != nil {
@@ -213,6 +214,11 @@ func (p *process) scanCommand(ctx context.Context, args []string) int {
 		}
 		rg.AllowEmpty = a.allowEmpty.given()
 		rep, err = s.ScanRange(ctx, hush.Repo{Dir: dir}, rg)
+		if errors.Is(err, hush.ErrRange) {
+			// A revision that does not resolve, a ref that names no commit,
+			// a shallow boundary: each is about the --range value (HSH-11/D54).
+			err = withArgument(err, a.rng.pos)
+		}
 	case hush.TargetStdin:
 		label := a.label.value
 		if a.label.given() && label == "" {
@@ -242,6 +248,22 @@ func indexFile() string {
 		return value
 	}
 	return ""
+}
+
+// gitDir returns the repository an index scan names: GIT_DIR, which the CLI
+// reads only for --index, made absolute against the working directory before
+// -C applies (ADR-001 section 2), or dir, the -C value or ".", when GIT_DIR
+// is not set or is empty. A git hook in a linked worktree sets GIT_DIR, and
+// git itself lets it win over -C, so hush does too (HSH-11/D52).
+func gitDir(dir string) string {
+	value := os.Getenv("GIT_DIR")
+	if value == "" {
+		return dir
+	}
+	if abs, err := filepath.Abs(value); err == nil {
+		return abs
+	}
+	return value
 }
 
 // withArgument returns err with the argument position n when it is a

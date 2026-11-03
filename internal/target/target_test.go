@@ -157,3 +157,6 @@ func TestIndex(t *testing.T) {
 	}
 	lc.Check(t, out.String(), fmt.Sprint(err))
 }
+
+// head is the range "HEAD".
+var head = Revs{Revs: []Rev{{Text: "HEAD", N: 1}}}

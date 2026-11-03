@@ -51,7 +51,7 @@ func (p *process) ghCommand(args []string) int {
 	}
 	stdin, stdout, stderr := p.stdin, p.stdout, p.stderr
 	out := output.New(stdout)
-	s := &target.Scan{Rules: genericRules(), Out: out, GitStderr: stderr}
+	s := &target.Scan{Rules: genericRules(), Out: out}
 	code, err := ghwrap.Run(s, args[1:], stdin, stdout, stderr)
 	if out.Flush() != nil {
 		return 2 // findings cannot be written (HSH-5/D13)

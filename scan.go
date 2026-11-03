@@ -11,12 +11,16 @@ import (
 )
 
 // Repo names a git repository for ScanIndex and ScanRange. The git commands
-// a scan runs inherit no GIT_ variable from the environment, so GIT_DIR,
-// GIT_WORK_TREE and GIT_INDEX_FILE, as a git hook sets them, never change
-// which repository or index is scanned: Dir and IndexFile alone say.
+// a scan runs get a fixed environment and inherit nothing (ADR-001 section
+// 5), so GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE, as a git hook sets them,
+// never change which repository or index is scanned: Dir and IndexFile alone
+// say. hush names the repository to git through GIT_DIR, so git's ownership
+// check, which applies only when git searches for a repository, does not
+// apply; the global switches and the fixed environment keep the repository's
+// configuration from running anything.
 type Repo struct {
-	// Dir is a work tree or a git directory, bare mirrors included. It is
-	// required.
+	// Dir is a work tree, a directory below one, or a git directory, bare
+	// mirrors included. It is required.
 	Dir string
 	// IndexFile is the index ScanIndex reads: "" for the repository's own,
 	// or a file that must exist and be a regular file. hush never reads
@@ -60,9 +64,10 @@ func (s *Scanner) start(ctx context.Context, t Target) (*run, error) {
 	}
 	r := &run{s: s, ctx: ctx, target: t}
 	r.t = &target.Scan{Rules: *s.rules.get(), Sets: s.sets.get(), Apply: s.apply, Ctx: ctx, Sink: r.add,
-		MaxFile: MaxInputSize, MaxLine: MaxLineSize, Unsafe: func(p string) bool { return unsafeAt(p) >= 0 }}
+		MaxFile: MaxInputSize, MaxLine: MaxLineSize, MaxGit: MaxGitOutput, Unsafe: func(p string) bool { return unsafeAt(p) >= 0 }}
 	if s.terms != nil {
 		r.t.Terms = *s.terms.path.get()
+		r.t.TermIDs = *s.terms.ids.get()
 	}
 	return r, nil
 }
@@ -135,6 +140,24 @@ func targetError(err error) *Error {
 		return newError(CodeRead, msgTooLarge, 0)
 	case target.TermFileGone:
 		return newError(CodeTermFile, msgTermMissing, 0)
+	case target.GitTooOld:
+		return newError(CodeGit, msgGitMinimum, 0)
+	case target.Grafts:
+		return newError(CodeGit, msgGrafts, 0)
+	case target.GitOutput:
+		return newError(CodeGit, msgGitOutput, 0)
+	case target.RevisionBad:
+		return newError(CodeRange, msgRevisionResolve, te.Arg)
+	case target.RefNotCommit:
+		return newError(CodeRange, msgRefNotCommit, 0)
+	case target.Shallow:
+		return newError(CodeRange, msgShallow, 0)
+	case target.TagUnreadable:
+		return newError(CodeGit, msgTagUnreadable, 0)
+	case target.TermFileInRepo:
+		return newError(CodeTermFile, msgTermInRepo, 0)
+	case target.TermFileCommitted:
+		return newError(CodeTermFile, msgTermCommitted, 0)
 	}
 	return errInternal()
 }
@@ -261,10 +284,14 @@ func (s *Scanner) ScanTree(ctx context.Context, root string, paths ...string) (r
 	return r.finish(r.t.Tree(root, paths))
 }
 
-// ScanIndex scans the git index of repo: each stage's entry path and the blob
-// it names, read by object id through git plumbing, never from the work tree.
-// Paths are relative to the top of the work tree. A missing repository is
-// ErrGit, and so is a set IndexFile that is not a regular file. A blob over
+// ScanIndex scans the git index of repo: each stage-0 entry's path and the
+// blob it names, read by object id through git plumbing, never from the work
+// tree. A path with conflict stages has no stage 0 and is not scanned; git
+// commits none of them. Paths are relative to the top of the work tree. A
+// missing repository, git missing or older than 2.44, a repository with
+// grafts, and a set IndexFile that is not a regular file are each ErrGit. A
+// repository whose work tree or git directory holds the term file, or that
+// holds the term file's bytes as an object, is ErrTermFile. A blob over
 // MaxInputSize or a line over MaxLineSize is ErrRead.
 func (s *Scanner) ScanIndex(ctx context.Context, repo Repo) (rep *Report, err error) {
 	defer recoverError(&err, func() { rep = nil })
@@ -286,11 +313,20 @@ func (s *Scanner) ScanIndex(ctx context.Context, repo Repo) (rep *Report, err er
 	return r.finish(r.t.Index(repo.Dir))
 }
 
-// ScanRange scans the commits rg selects in repo, oldest first: each commit's
-// author, committer and message, the paths it adds or changes and the lines
-// it adds, against its first parent. rg must pass the checks ParseRange makes
-// (ErrRange otherwise), and a range with no commits is ErrEmptyRange unless
-// rg.AllowEmpty is set. A line over MaxLineSize is ErrRead.
+// ScanRange scans the commits rg selects in repo, oldest first: each commit
+// object's headers but tree and parent, and its message; the paths it adds or
+// changes and the lines it adds, against its first parent. Every annotated
+// tag in the peel chain of an included revision or ref is scanned as an
+// object of its own, right after the commit it points to, or after every
+// commit when that commit is not walked. Signature blocks are skipped but for
+// their lines of text. rg must pass the checks ParseRange makes, and each
+// revision must resolve to a commit or to a tag of one (ErrRange otherwise);
+// hush lists the selectors' refs itself, and a listed ref to walk that does
+// not point to a commit is ErrRange, as is a walk that reaches a shallow
+// boundary. A range with no commits is ErrEmptyRange unless rg.AllowEmpty is
+// set. The repository conditions are ScanIndex's. A blob over MaxInputSize,
+// a line over MaxLineSize or one git command's output over MaxGitOutput is
+// ErrRead.
 func (s *Scanner) ScanRange(ctx context.Context, repo Repo, rg Range) (rep *Report, err error) {
 	defer recoverError(&err, func() { rep = nil })
 	r, err := s.start(ctx, TargetRange)
@@ -300,11 +336,11 @@ func (s *Scanner) ScanRange(ctx context.Context, repo Repo, rg Range) (rep *Repo
 	if repo.Dir == "" {
 		return nil, newError(CodeUsage, msgRepoDir, 0)
 	}
-	args, err := rg.revListArgs()
+	revs, err := rg.revs()
 	if err != nil {
 		return nil, err
 	}
-	if err := r.t.RevList(repo.Dir, args); err != nil {
+	if err := r.t.Range(repo.Dir, revs); err != nil {
 		return r.finish(err)
 	}
 	if r.t.Counts.Commits == 0 && !rg.AllowEmpty {

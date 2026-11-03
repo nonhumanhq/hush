@@ -177,7 +177,7 @@ func TestAddressRowsAreFlaggedInEveryTarget(t *testing.T) {
 		short := commit(t, git, "HSH-14: rows")
 		var out strings.Builder
 		s := registryScan(&out)
-		err := s.Range(dir, "HEAD")
+		err := s.Range(dir, head)
 		s.Out.Flush()
 		check(t, strings.ReplaceAll(out.String(), short+":rows.txt:", "X:"), err)
 		if !strings.HasPrefix(out.String(), short+":rows.txt:1: ip-address\n") {
@@ -191,7 +191,7 @@ func TestAddressRowsAreFlaggedInEveryTarget(t *testing.T) {
 		short := commit(t, git, "HSH-14: rows\n\n"+all)
 		var out strings.Builder
 		s := registryScan(&out)
-		err := s.Range(dir, "HEAD")
+		err := s.Range(dir, head)
 		s.Out.Flush()
 		if err != nil {
 			t.Fatalf("scan failed: %v", err)
@@ -288,31 +288,21 @@ func TestAddressRowsAsPaths(t *testing.T) {
 		dir, git := gitRepo(t)
 		var want strings.Builder
 		var kept []string
-		missed := 0
 		for i, r := range rows {
 			p := filepath.ToSlash(filepath.Clean(rowPath(i, r)))
 			write(t, dir, p, "ok\n")
-			// Known miss, inherited from HSH-5/D7: diff-tree writes a backslash
-			// as two and the range target matches that text, so the escaped-@
-			// row is not found here (the tree and index targets find it). It is
-			// committed and scanned all the same, so the leak check below sees
-			// anything the scan prints about it. Once HSH-11 takes range paths
-			// from -z records the output has a line more than want: keep the
-			// row then. A quote alone is fine, git writes \", so that row is found.
-			if strings.Contains(r.line, "\\") {
-				missed++
-				continue
-			}
+			// Paths come from diff-tree's -z records as git's raw bytes
+			// (HSH-11/T22), so the escaped-@ row, which HSH-5/D7's patch
+			// headers wrote with a doubled backslash and the rule then
+			// missed, is found here as in the tree and index targets
+			// (HSH-14/D15).
 			kept = append(kept, p)
-		}
-		if missed != 1 {
-			t.Fatalf("range: %d rows are known misses, want 1", missed)
 		}
 		git("add", "-A")
 		short := commit(t, git, "HSH-14: paths")
 		var out strings.Builder
 		s := registryScan(&out)
-		err := s.Range(dir, "HEAD")
+		err := s.Range(dir, head)
 		s.Out.Flush()
 		slices.Sort(kept)
 		for _, p := range kept {
@@ -375,7 +365,7 @@ func TestAddressRulesFeedRedaction(t *testing.T) {
 			short := commit(t, git, "HSH-14: path")
 			var out strings.Builder
 			s := registryScan(&out)
-			err := s.Range(dir, "HEAD")
+			err := s.Range(dir, head)
 			s.Out.Flush()
 			if err != nil || out.String() != short+":"+want {
 				t.Errorf("range: error %v, output %q", err, out.String())
@@ -415,7 +405,7 @@ func TestCommitIdentityIsFlaggedWhateverTheRepositorySays(t *testing.T) {
 
 	var found strings.Builder
 	s := registryScan(&found)
-	err = s.Range(dir, "HEAD")
+	err = s.Range(dir, head)
 	s.Out.Flush()
 	if err != nil {
 		t.Fatalf("range: %v", err)

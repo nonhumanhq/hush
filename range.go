@@ -3,12 +3,15 @@ package hush
 import (
 	"strings"
 	"unicode"
+
+	"github.com/nonhumanhq/hush/internal/target"
 )
 
 // RefSelector names a namespace of refs a range includes or excludes.
 type RefSelector uint8
 
-// The ref selectors of ADR-001 section 5. The zero value is not one.
+// The ref selectors of ADR-001 section 5, with the target's values. The zero
+// value is not one.
 const (
 	AllRefs  RefSelector = iota + 1 // --all
 	Branches                        // --branches
@@ -114,47 +117,48 @@ func goodDots(w string) bool {
 	return ok && goodRevision(a) && goodRevision(b) && b[0] != '.'
 }
 
-// revListArgs checks rg as ParseRange would and returns rev-list's arguments
-// for it: the included revisions and selectors, then "--not" and the excluded
-// ones, then "--". The "--" makes git read every word as a revision: without
-// it, a word that names no revision but names a file, or is a pathspec such
-// as "*.md" or ":!a.md", narrows the walk to the commits that touch those
-// paths. With it, such a word is a bad revision, ErrRange (HSH-11/D36).
-func (rg Range) revListArgs() ([]string, error) {
-	var args []string
+// revs checks rg as ParseRange would and returns what the range target
+// walks: each included revision, and for "A..B" B, to walk; each excluded
+// one, and A, to subtract; and the selectors. Revisions are numbered in
+// order, the included ones first, and "A..B" is one revision. The target
+// resolves each to an object id before rev-list runs, so a word that names a
+// file or is a pathspec, which rev-list would take as a path and use to narrow
+// the walk, is a revision that does not resolve (HSH-11/D36, D54).
+func (rg Range) revs() (target.Revs, error) {
+	var tr target.Revs
 	n := 0
 	for _, w := range rg.Include {
 		n++
-		if !goodRevision(w) && !goodDots(w) {
-			return nil, newError(CodeRange, msgRangeRevision, n)
+		switch a, b, dots := strings.Cut(w, ".."); {
+		case goodRevision(w):
+			tr.Revs = append(tr.Revs, target.Rev{Text: w, N: n})
+		case dots && goodDots(w):
+			tr.Revs = append(tr.Revs, target.Rev{Text: b, N: n}, target.Rev{Text: a, N: n, Not: true})
+		default:
+			return target.Revs{}, newError(CodeRange, msgRangeRevision, n)
 		}
-		args = append(args, w)
 	}
 	for i, sel := range rg.IncludeRefs {
 		if sel.String() == "" {
-			return nil, newError(CodeRange, msgRangeSelector, i+1)
+			return target.Revs{}, newError(CodeRange, msgRangeSelector, i+1)
 		}
-		args = append(args, sel.String())
+		tr.Refs = append(tr.Refs, target.Ref{Sel: target.Selector(sel)})
 	}
-	if len(args) == 0 {
-		return nil, newError(CodeRange, msgRangeNothing, 0)
+	if len(tr.Revs)+len(tr.Refs) == 0 {
+		return target.Revs{}, newError(CodeRange, msgRangeNothing, 0)
 	}
-	if len(rg.Exclude)+len(rg.ExcludeRefs) == 0 {
-		return append(args, "--"), nil
-	}
-	args = append(args, "--not")
 	for _, w := range rg.Exclude {
 		n++
 		if !goodRevision(w) {
-			return nil, newError(CodeRange, msgRangeRevision, n)
+			return target.Revs{}, newError(CodeRange, msgRangeRevision, n)
 		}
-		args = append(args, w)
+		tr.Revs = append(tr.Revs, target.Rev{Text: w, N: n, Not: true})
 	}
 	for i, sel := range rg.ExcludeRefs {
 		if sel.String() == "" {
-			return nil, newError(CodeRange, msgRangeSelector, len(rg.IncludeRefs)+i+1)
+			return target.Revs{}, newError(CodeRange, msgRangeSelector, len(rg.IncludeRefs)+i+1)
 		}
-		args = append(args, sel.String())
+		tr.Refs = append(tr.Refs, target.Ref{Sel: target.Selector(sel), Not: true})
 	}
-	return append(args, "--"), nil
+	return tr, nil
 }

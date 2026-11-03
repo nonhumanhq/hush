@@ -647,15 +647,31 @@ func TestPreCommitIndexFile(t *testing.T) {
 	}
 	code, out = h.run(sub, []string{"GIT_INDEX_FILE=../.git/index"}, hook)
 	h.expect("a relative index from a subdirectory", code, out, 1, "a.md:1: id-prefix\n")
+
+	// An index file other than the repository's own, as git commit hands
+	// the hook for a partial commit (index.lock or a temporary index): the
+	// token is only there, so the scan must read that file, by its absolute
+	// or its relative name (part d: git gets no inherited variable, so hush
+	// must pass it).
+	other := filepath.Join(h.root, "other-index")
+	h.write(other, h.read(filepath.Join(repo, ".git", "index")))
+	h.git(repo, "rm", "-q", "--cached", "a.md")
+	code, out = h.run(repo, nil, hook)
+	h.expect("the repository's own index, without the token", code, out, 0, "")
+	code, out = h.run(repo, []string{"GIT_INDEX_FILE=" + other}, hook)
+	h.expect("another index file", code, out, 1, "a.md:1: id-prefix\n")
+	code, out = h.run(sub, []string{"GIT_INDEX_FILE=../../other-index"}, hook)
+	h.expect("another index file, relative from a subdirectory", code, out, 1, "a.md:1: id-prefix\n")
+
 	// An index other than the repository's own: git must read the one named,
 	// so the finding is in b.md, which only that index stages. Every case
 	// above names the repository's own index, which git reads by default.
-	other := filepath.Join(h.root, "other-index")
+	other2 := filepath.Join(h.root, "other-index-2")
 	h.write(filepath.Join(repo, "b.md"), "see "+lc.Bad+"\n")
-	if code, out := h.run(repo, []string{"GIT_INDEX_FILE=" + other}, "git", "add", "b.md"); code != 0 {
+	if code, out := h.run(repo, []string{"GIT_INDEX_FILE=" + other2}, "git", "add", "b.md"); code != 0 {
 		t.Fatalf("git add: %s", out)
 	}
-	code, out = h.run(repo, []string{"GIT_INDEX_FILE=" + other}, hook)
+	code, out = h.run(repo, []string{"GIT_INDEX_FILE=" + other2}, hook)
 	h.expect("another index", code, out, 1, "b.md:1: id-prefix\n")
 }
 

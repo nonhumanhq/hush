@@ -156,7 +156,7 @@ func TestContextCancelledAtEnd(t *testing.T) {
 	git("commit", "-q", "-m", "one")
 	scans := map[string]func(r *run) error{
 		"buffer": func(r *run) error { r.t.Buffer([]byte("see "+lc.Bad+"\n"), "<stdin>"); return nil },
-		"range":  func(r *run) error { return r.t.RevList(dir, []string{"HEAD", "--"}) },
+		"range":  func(r *run) error { return r.t.Range(dir, target.Revs{Revs: []target.Rev{{Text: "HEAD", N: 1}}}) },
 	}
 	for name, scan := range scans {
 		ctx, cancel := context.WithCancel(bg)
@@ -334,8 +334,8 @@ func TestScanRange(t *testing.T) {
 }
 
 // A range word that names a file, or is a pathspec, is a bad revision and
-// never narrows the walk (HSH-11/D36): rev-list gets "--" after the
-// revisions.
+// never narrows the walk (HSH-11/D36): each revision is resolved to an
+// object id before rev-list runs (part d, D54), and rev-list sees ids only.
 func TestRangePathspecRefused(t *testing.T) {
 	s := scanner(t, Config{Destination: Public(), GenericOnly: true})
 	dir, git := gitRepo(t)
@@ -356,7 +356,7 @@ func TestRangePathspecRefused(t *testing.T) {
 		}
 		rep, err := s.ScanRange(bg, Repo{Dir: dir}, rg)
 		wantError(t, err, CodeRange)
-		if rep != nil || err == nil || err.Error() != "range: the revisions do not resolve" {
+		if rep != nil || err == nil || err.Error() != "range: revision 2 does not resolve to a commit" {
 			t.Errorf("%q: got %v", text, err)
 		}
 	}
@@ -506,8 +506,8 @@ func TestParseRange(t *testing.T) {
 			!slices.Equal(got.IncludeRefs, want.IncludeRefs) || !slices.Equal(got.ExcludeRefs, want.ExcludeRefs) || got.AllowEmpty {
 			t.Errorf("ParseRange(%q) = %+v, %v", text, got, err)
 		}
-		if _, err := got.revListArgs(); err != nil {
-			t.Errorf("%q: revListArgs: %v", text, err)
+		if _, err := got.revs(); err != nil {
+			t.Errorf("%q: revs: %v", text, err)
 		}
 	}
 	bad := map[string]string{

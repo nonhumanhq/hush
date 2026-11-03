@@ -149,8 +149,9 @@ func TestScanArguments(t *testing.T) {
 		// The combination is checked before the term file is read.
 		{[]string{"--destination", "private", "--terms", "missing.txt", "."}, "coverage", "the private destination takes no term file"},
 		{[]string{"--destination", k8, "--terms", "missing.txt", "."}, "term-file", "term file: missing or unreadable"},
-		// A value is taken verbatim, even one that starts with "-".
-		{with("--range", "--all"), "git", "not a git repository"},
+		// A value is taken verbatim, even one that starts with "-". isolate
+		// leaves no git on PATH, so the range reaches the git check (part d).
+		{with("--range", "--all"), "git", "git is missing or older than 2.44"},
 		{with("--range", "--not"), "range", "argument 5: range: nothing to include"},
 		{with("--range", "HEAD --max-count=1"), "range", "argument 5: range: word 2 is refused"},
 		{with("--range", "HEAD -- docs"), "range", "argument 5: range: word 2 is refused"},

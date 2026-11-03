@@ -1,8 +1,12 @@
 package hush
 
 import (
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"log/slog"
 	"os"
@@ -23,6 +27,11 @@ const MaxTermFileSize = 1 << 20
 // skipped (HSH-11/D4).
 const MaxInputSize = 64 << 20
 
+// MaxGitOutput is the most output a scan reads from one git command, in
+// bytes, such as one commit's diff or a long list of commits. More stops the
+// scan with ErrRead (HSH-11/D4).
+const MaxGitOutput = 512 << 20
+
 // MaxLineSize is the longest line a scan reads, in bytes, without its
 // newline. A longer one stops the scan with ErrRead (HSH-11/D4).
 const MaxLineSize = 4 << 20
@@ -40,6 +49,10 @@ type TermSets struct {
 	// depth (HSH-11/D38).
 	sets *box[termset.Sets]
 	path *box[string]
+	// ids maps "sha1" and "sha256" to the object id the file's bytes have as
+	// a blob, which index and range scans look for in the repository
+	// (ADR-001 section 5). They are never printed, and boxed like the rest.
+	ids *box[map[string]string]
 }
 
 // LoadTermSets reads the term file at path, the only way terms enter hush. The
@@ -77,7 +90,8 @@ func LoadTermSets(path string) (t *TermSets, err error) {
 	case err != nil:
 		return nil, errInternal()
 	}
-	return &TermSets{sets: newBox(sets), path: newBox(&abs)}, nil
+	ids := blobIDs(data)
+	return &TermSets{sets: newBox(sets), path: newBox(&abs), ids: newBox(&ids)}, nil
 }
 
 // readTermFile reads the file at path, which is absolute, under
@@ -122,7 +136,19 @@ func termFileOK(fi os.FileInfo, err error) error {
 }
 
 // loaded reports whether t came from LoadTermSets.
-func (t *TermSets) loaded() bool { return t != nil && t.sets != nil && t.path != nil }
+func (t *TermSets) loaded() bool { return t != nil && t.sets != nil && t.path != nil && t.ids != nil }
+
+// blobIDs returns the object ids data has as a git blob, in a sha1 and in a
+// sha256 repository: the hash of "blob", its length, a NUL and data.
+func blobIDs(data []byte) map[string]string {
+	head := []byte("blob " + strconv.Itoa(len(data)) + "\x00")
+	one, two := sha1.New(), sha256.New()
+	for _, h := range []hash.Hash{one, two} {
+		h.Write(head)
+		h.Write(data)
+	}
+	return map[string]string{"sha1": hex.EncodeToString(one.Sum(nil)), "sha256": hex.EncodeToString(two.Sum(nil))}
+}
 
 // Names returns the set names, in file order. Set names are printed in
 // findings, so they are safe to print; client labels are not, and no method

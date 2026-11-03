@@ -1,7 +1,7 @@
 ---
 kind: decision
 status: accepted
-verified: 2026-10-25
+verified: 2026-11-02
 supersedes: []
 ---
 
@@ -605,7 +605,7 @@ type Range struct {
 	Include     []string      // revisions: a name, an object id (an annotated tag's too) or "A..B"
 	IncludeRefs []RefSelector // AllRefs, Branches, Tags, Remotes (section 5)
 	Exclude     []string      // revisions to subtract: ^REV, or after --not
-	ExcludeRefs []RefSelector // selectors after --not; the pre-push new-branch case is {Remotes}
+	ExcludeRefs []RefSelector // selectors after --not; the pre-push new-branch case uses Exclude, not {Remotes} (amended 2026-11-02)
 	AllowEmpty  bool          // otherwise a range with no commits is ErrEmptyRange
 }
 
@@ -987,6 +987,8 @@ The human accepted this ADR on 2026-10-24 and took the recommended option for ea
 **Amended on 2026-10-25,** with ADR-002's acceptance (PR #10, ADR-002's decided item 7). The amendment records the two places where ADR-002 extends this ADR's text, and changes none of the decisions above:
 - **Section 6.3's schema** takes ADR-002's set-name grammar, 1 to 64 characters from `[A-Za-z0-9_.-]`, in `sets` and in the `set:` branch of a finding's `rule`. It had the interim's grammar, pending ADR-002.
 - **Section 5's output check** also accepts the two unscanned names of section 6.1, `binary-unscanned` and `unreadable`, which ADR-002 keeps out of its rule registry.
+
+**Amended on 2026-11-02,** with HSH-11 (issue criterion 8). Section 7's outline said the `pre-push` hook's new-branch case is `ExcludeRefs: {Remotes}`. It is not: a new branch subtracts only the commits the destination advertises (its heads and tags) that the repository holds, passed as revisions to exclude, `Range.Exclude`, which the range text writes as `LOCAL --not ID…`. Remote-tracking refs are never trusted, and when the destination cannot be asked, nothing is subtracted and the whole history is scanned; so too when `git ls-remote --get-url` gives back another URL than the one pushed to, as an `insteadOf` rule or a remote of that name makes it, since `ls-remote` would then ask another repository. Section 5's range grammar already accepted this; only the outline's comment changes. One reading of section 5 is recorded with it (HSH-11/D54): a ref that a subtracted selector lists and whose fully peeled target is not a commit subtracts nothing and is skipped, rather than refused as such a ref is when it is to be walked, so the scan covers more, never less.
 
 ## Open questions for the human
 

@@ -88,7 +88,7 @@ func TestContexts(t *testing.T) {
 	git("-c", "user.name=alice", "-c", "user.email=alice@example.com", "commit", "-q", "--cleanup=verbatim",
 		"--date=2026-01-01T00:00:00Z", "-m", "HSH-11: subject\n\nbody")
 	id := "alice <alice@example.com> 1767225600 +0000"
-	got := scan(func(s *Scan) error { return s.Range("", "HEAD") })
+	got := scan(func(s *Scan) error { return s.Range("", head) })
 	// The committer date is the clock's: compare the committer line by its start.
 	for i, g := range got {
 		if strings.HasPrefix(g, seen(O, rule.Committer, "", "committer alice <alice@example.com> ")) {
@@ -133,7 +133,7 @@ func TestTargetsFeedTheIdentityAllowance(t *testing.T) {
 	} {
 		var found strings.Builder
 		s := &Scan{Rules: rule.Registry(c.ids), Out: output.New(&found)}
-		err := s.Range(dir, "HEAD")
+		err := s.Range(dir, head)
 		s.Out.Flush()
 		if got := strings.ReplaceAll(found.String(), short, "SHA"); err != nil || got != c.want {
 			t.Errorf("range with %d identities: error %v, %d findings", len(c.ids), err, strings.Count(got, "\n"))
@@ -183,7 +183,7 @@ func TestNegative9IDPrefixAndReference(t *testing.T) {
 		write(t, dir, "reference/notes.md", "cites "+fleet+"\nand "+fleet+" again\n")
 		git("add", "-A")
 		c2 := commit(t, git, "HSH-11: quote "+fleet)
-		run("range", func(s *Scan) error { return s.Range("", "HEAD") },
+		run("range", func(s *Scan) error { return s.Range("", head) },
 			c1+":Reference/a.md:1: id-prefix\n"+c1+":docs/reference/a.md:1: id-prefix\n"+c2+":(commit):6: id-prefix\n")
 		run("stdin", func(s *Scan) error { return s.Stdin(strings.NewReader(fleet+"\n"), "reference/notes.md") },
 			"reference/notes.md:1: id-prefix\n")
@@ -198,7 +198,7 @@ func TestNegative9IDPrefixAndReference(t *testing.T) {
 		git("add", "-A")
 		run("index", func(s *Scan) error { return s.Index("") }, "reference:1: id-prefix\n")
 		c := commit(t, git, "HSH-11: add the file")
-		run("range", func(s *Scan) error { return s.Range("", "HEAD") }, c+":reference:1: id-prefix\n")
+		run("range", func(s *Scan) error { return s.Range("", head) }, c+":reference:1: id-prefix\n")
 	})
 }
 

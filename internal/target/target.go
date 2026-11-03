@@ -28,8 +28,7 @@ type Scan struct {
 	// Apply is the sets findings apply, or nil for every set in Sets.
 	Apply termset.Mask
 	// Sink receives every finding, raw, in output order. When it is set, Out
-	// is not used and nothing is printed (HSH-11/D31), and git runs without
-	// any inherited GIT_ variable (HSH-11/D31).
+	// is not used and nothing is printed (HSH-11/D31).
 	Sink func(Finding)
 	Out  *output.Writer
 	// Ctx, when set, stops the scan between files, commits and index entries
@@ -38,15 +37,13 @@ type Scan struct {
 	// Counts is what the scan has scanned so far (HSH-11/D18).
 	Counts Counts
 	// Terms is the term file's path, or "". A tree scan refuses any path
-	// argument that holds it.
+	// argument that holds it; an index or range scan refuses a repository
+	// whose work tree or git directory holds it.
 	Terms string
-	// GitStderr receives git's standard error from the two calls whose
-	// errors the interim relays (HSH-5/D7). Nil discards it.
-	GitStderr io.Writer
-	// GitStdin is rev-list's standard input, which --range's "--stdin" reads,
-	// as in the interim (HSH-5/D7). Pass hush's own unwrapped, so exec hands
-	// over the descriptor instead of copying it. Nil gives /dev/null.
-	GitStdin io.Reader
+	// TermIDs maps an object format, "sha1" or "sha256", to the object id the
+	// term file's bytes have as a blob in it. An index or range scan refuses
+	// a repository that holds that object (ADR-001 section 5).
+	TermIDs map[string]string
 	// IndexFile is the absolute path of the index file Index reads, or "" for
 	// the one git finds itself (HSH-9/D5).
 	IndexFile string
@@ -54,6 +51,9 @@ type Scan struct {
 	// longest line the scan reads, in bytes. More stops the scan with
 	// TooLarge; nothing is skipped (HSH-11/D4).
 	MaxFile, MaxLine int
+	// MaxGit, when not 0, is the most output one git command may give, in
+	// bytes. More stops the scan with TooLarge (HSH-11/D4).
+	MaxGit int
 	// Unsafe, when set, reports whether a path cannot print safely. Such a
 	// path also gives "unreadable" in path at line 0 (ADR-001 section 5).
 	Unsafe func(path string) bool
@@ -78,6 +78,7 @@ const (
 	InStdin                 // standard input or a caller's buffer: Label
 	InCommit                // a commit object: Commit and Part
 	InDiff                  // a path a commit adds or changes: Commit and Path
+	InTag                   // an annotated tag object: Tag and Part
 )
 
 // Finding is one finding as a target reports it, before redaction: where it
@@ -87,7 +88,8 @@ type Finding struct {
 	Path   string    // the path as normalized, before redaction
 	Label  string    // the stdin label
 	Commit string    // the commit's full object id
-	Part   rule.Part // the part of a commit object
+	Tag    string    // the annotated tag object's full object id
+	Part   rule.Part // the part of a commit or tag object
 	Line   int       // 1-based, or 0 for the path or the whole file
 	Rule   string    // a rule's name, "set:NAME", "binary-unscanned" or "unreadable"
 	InPath bool      // the path itself broke the rule
@@ -209,6 +211,8 @@ func (s *Scan) where(f Finding) string {
 		return f.Label
 	case InCommit:
 		return short(f.Commit) + ":(commit)"
+	case InTag:
+		return short(f.Tag) + ":(tag)"
 	}
 	return short(f.Commit) + ":" + s.redact(f.Path)
 }
