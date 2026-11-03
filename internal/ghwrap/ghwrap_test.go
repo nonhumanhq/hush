@@ -1,6 +1,7 @@
 package ghwrap
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -11,11 +12,8 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/nonhumanhq/hush"
 	lc "github.com/nonhumanhq/hush/internal/leakcheck"
-	"github.com/nonhumanhq/hush/internal/output"
-	"github.com/nonhumanhq/hush/internal/rule"
-	"github.com/nonhumanhq/hush/internal/target"
-	"github.com/nonhumanhq/hush/internal/termset"
 )
 
 // The test binary is also the fake gh: linked as "gh", alone on PATH, it
@@ -91,18 +89,45 @@ func called(t *testing.T, dir string) (args []string, stdin string, ok bool) {
 	return args, string(in), true
 }
 
-// scanner returns a scan with the ID-prefix rule and, if terms, the
-// synthetic term sets.
-func scanner(t *testing.T, out io.Writer, terms bool) *target.Scan {
-	s := &target.Scan{Rules: rule.List{rule.IDPrefix{}}, Out: output.New(out)}
+// scanner returns a Scanner for the public destination: the generic tier
+// alone, or, if terms, with the synthetic term sets.
+func scanner(t *testing.T, terms bool) *hush.Scanner {
+	t.Helper()
+	cfg := hush.Config{Destination: hush.Public(), GenericOnly: !terms}
 	if terms {
-		sets, err := termset.Parse([]byte(lc.TermFile()))
-		if err != nil {
-			t.Fatal("parse failed")
+		p := filepath.Join(t.TempDir(), "terms")
+		if err := os.WriteFile(p, []byte(lc.TermFile()), 0o600); err != nil {
+			t.Fatal(err)
 		}
-		s.Sets = sets
+		ts, err := hush.LoadTermSets(p)
+		if err != nil {
+			t.Fatal("LoadTermSets failed")
+		}
+		cfg.Terms = ts
+	}
+	s, err := hush.New(cfg)
+	if err != nil {
+		t.Fatal("New failed")
 	}
 	return s
+}
+
+// run calls Run with a scanner and returns its exit status, what gh wrote
+// to standard output followed by the findings in the plain format, what gh
+// wrote to standard error, and Run's error.
+func run(t *testing.T, terms bool, args []string, stdin string) (int, string, string, error) {
+	t.Helper()
+	var out, errs strings.Builder
+	code, reports, err := Run(context.Background(), scanner(t, terms), args, strings.NewReader(stdin), &out, &errs)
+	for _, rep := range reports {
+		if rep.WritePlain(&out) != nil {
+			t.Error("WritePlain failed")
+		}
+	}
+	if len(reports) > 0 && code != 1 {
+		t.Errorf("exit %d with %d reports", code, len(reports))
+	}
+	return code, out.String(), errs.String(), err
 }
 
 func TestRun(t *testing.T) {
@@ -118,8 +143,9 @@ func TestRun(t *testing.T) {
 	body, badBody := file("body.md", "one\ntwo\n"), file("bad.md", "one\nsee "+lc.Bad+"\n")
 	req := file("req.json", `{"body":"clean"}`)
 	edge := strings.Repeat("a", maxArg-1-len("--body=")) // the longest body one argument holds (HSH-9/D9)
-	edgeFile := file("edge.md", edge)
-	esc := strings.Replace(lc.Bad, "-", `\u002d`, 1) // the token behind a JSON escape
+	long := file("long.md", strings.Repeat("a", 4*maxArg)+"\nsee "+lc.Bad+"\n")
+	longClean := file("long-clean.md", strings.Repeat("a", 4*maxArg)) // past an argument's limit, on standard input (HSH-11/D9)
+	esc := strings.Replace(lc.Bad, "-", `\u002d`, 1)                  // the token behind a JSON escape
 	for _, c := range []struct {
 		name   string
 		terms  bool
@@ -133,43 +159,69 @@ func TestRun(t *testing.T) {
 		{"clean issue create", false, []string{"issue", "create", "-t", "HSH-9: hooks", "--body", "one\ntwo"}, "",
 			0, "gh output\n", []string{"issue", "create", "--title=HSH-9: hooks", "--body=one\ntwo"}, ""},
 		{"token in a title", false, []string{"issue", "create", "--title=see " + lc.Bad, "-b", "x"}, "",
-			1, "--title:1: id-prefix\n", nil, ""},
+			1, "title:1: id-prefix\n", nil, ""},
 		{"token on a body's third line", false, []string{"pr", "edit", "4", "-b", "one\ntwo\n" + lc.Bad}, "",
-			1, "--body:3: id-prefix\n", nil, ""},
-		{"body file", false, []string{"pr", "create", "-F", body, "-t", "x", "-d"}, "",
-			0, "gh output\n", []string{"pr", "create", "--body=one\ntwo\n", "--title=x", "--draft"}, ""},
+			1, "body:3: id-prefix\n", nil, ""},
+		{"body file, on gh's standard input", false, []string{"pr", "create", "-F", body, "-t", "x", "-d"}, "",
+			0, "gh output\n", []string{"pr", "create", "--body-file=-", "--title=x", "--draft"}, "one\ntwo\n"},
+		{"body file longer than an argument holds", false, []string{"issue", "comment", "5", "--body-file", longClean}, "",
+			0, "gh output\n", []string{"issue", "comment", "--body-file=-", "5"}, strings.Repeat("a", 4*maxArg)},
+		{"token in a long body file", false, []string{"issue", "comment", "5", "--body-file", long}, "",
+			1, "body-file:2: id-prefix\n", nil, ""},
 		{"token in a body file", false, []string{"issue", "comment", "5", "--body-file=" + badBody}, "",
-			1, "--body-file:2: id-prefix\n", nil, ""},
+			1, "body-file:2: id-prefix\n", nil, ""},
 		{"body file on standard input", false, []string{"issue", "comment", "5", "-F", "-"}, "ok\n",
-			0, "gh output\n", []string{"issue", "comment", "--body=ok\n", "5"}, ""},
+			0, "gh output\n", []string{"issue", "comment", "--body-file=-", "5"}, "ok\n"},
 		{"token on standard input", false, []string{"pr", "review", "7", "-c", "--body-file", "-"}, "x\n" + lc.Bad,
-			1, "--body-file:2: id-prefix\n", nil, ""},
+			1, "body-file:2: id-prefix\n", nil, ""},
 		{"grouped shorthands", false, []string{"pr", "review", "7", "-cbsee " + lc.Bad}, "",
-			1, "--body:1: id-prefix\n", nil, ""},
+			1, "body:1: id-prefix\n", nil, ""},
 		{"value after a shorthand group", false, []string{"pr", "review", "-cb", "fine", "7"}, "",
 			0, "gh output\n", []string{"pr", "review", "--comment", "--body=fine", "7"}, ""},
 		{"closing comment", false, []string{"issue", "close", "3", "-c", "see " + lc.Bad, "-r", "not planned"}, "",
-			1, "--comment:1: id-prefix\n", nil, ""},
+			1, "comment:1: id-prefix\n", nil, ""},
 		{"alias", false, []string{"issue", "new", "-t", lc.Bad, "-b", "x"}, "",
-			1, "--title:1: id-prefix\n", nil, ""},
+			1, "title:1: id-prefix\n", nil, ""},
 		{"term in a body", true, []string{"pr", "comment", "-b", "about " + lc.Client}, "",
-			1, "--body:1: set:clients\n", nil, ""},
+			1, "body:1: set:clients\n", nil, ""},
 		{"api fields", false, []string{"api", "repos/acme/x/issues/1/comments", "-X", "POST", "-f", "body=clean",
 			"-F", "note=@" + body, "-F", "n=3", "--jq", ".id"}, "",
 			0, "gh output\n", []string{"api", "--method=POST", "--raw-field=body=clean", "--raw-field=note=one\ntwo\n",
 				"--field=n=3", "--jq=.id", "repos/acme/x/issues/1/comments"}, ""},
 		{"token in an api field", false, []string{"api", "graphql", "-f", "query=one\n" + lc.Bad}, "",
-			1, "--raw-field query:2: id-prefix\n", nil, ""},
+			1, "raw-field-1:2: id-prefix\n", nil, ""},
 		{"token in an api file field", false, []string{"api", "x", "-F", "body=@" + badBody}, "",
-			1, "--field body:2: id-prefix\n", nil, ""},
+			1, "field-1:2: id-prefix\n", nil, ""},
 		{"token in a field on standard input", false, []string{"api", "x", "-F", "body=@-"}, lc.Bad,
-			1, "--field body:1: id-prefix\n", nil, ""},
+			1, "field-1:1: id-prefix\n", nil, ""},
 		{"token in a key", false, []string{"api", "x", "-f", lc.Bad + "=v"}, "",
-			1, "--raw-field <redacted>:1: id-prefix\n", nil, ""},
+			1, "raw-field-1:1: id-prefix\n", nil, ""},
 		{"term in a key", true, []string{"api", "x", "-f", strings.ToLower(lc.Person) + "=v"}, "",
-			1, "--raw-field <redacted>:1: set:people\n", nil, ""},
+			1, "raw-field-1:1: set:people\n", nil, ""},
 		{"token in the endpoint", false, []string{"api", "search/issues?q=" + lc.Bad}, "",
 			1, "endpoint:1: id-prefix\n", nil, ""},
+		// GitHub decodes the endpoint's percent-escapes (HSH-11/D10).
+		{"token behind a percent-escape in the endpoint's query", false,
+			[]string{"api", "search/issues?q=" + strings.Replace(lc.Bad, "-", "%2D", 1)}, "",
+			1, "endpoint-decoded:1: id-prefix\n", nil, ""},
+		{"token behind a percent-escape in the endpoint's path", false,
+			[]string{"api", "repos/acme/x/issues/" + strings.Replace(lc.Bad, "-", "%2d", 1)}, "",
+			1, "endpoint-decoded:1: id-prefix\n", nil, ""},
+		{"a clean endpoint with escapes goes to gh as given", false, []string{"api", "search/issues?q=a%20b"}, "",
+			0, "gh output\n", []string{"api", "search/issues?q=a%20b"}, ""},
+		// In the query, "+" is a space too (HSH-11/D10).
+		{"term behind a plus in the endpoint's query", true,
+			[]string{"api", "search/issues?q=" + strings.ReplaceAll(lc.Client2, " ", "+")}, "",
+			1, "endpoint-decoded:1: set:clients\n", nil, ""},
+		{"term behind a plus in a posted endpoint's query", true,
+			[]string{"api", "-XPOST", "repos/acme/x/issues?title=" + strings.ReplaceAll(lc.Client2, " ", "+")}, "",
+			1, "endpoint-decoded:1: set:clients\n", nil, ""},
+		{"term behind a plus in a query key", true,
+			[]string{"api", "search/issues?" + strings.ReplaceAll(lc.Client2, " ", "+") + "=1"}, "",
+			1, "endpoint-decoded:1: set:clients\n", nil, ""},
+		{"fields are labelled by their position among the fields", false,
+			[]string{"api", "x", "-f", "a=1", "-F", "b=2", "-f", "c=see " + lc.Bad, "-F", "d=" + lc.Near}, "",
+			1, "raw-field-3:1: id-prefix\nfield-4:1: id-prefix\n", nil, ""},
 		{"a GET of the contents API", false, []string{"api", "repos/acme/x/contents/notes.md"}, "",
 			0, "gh output\n", []string{"api", "repos/acme/x/contents/notes.md"}, ""},
 		{"a GET of the contents API with fields", false, []string{"api", "-X", "get", "repos/acme/x/contents/a.md", "-f", "ref=main"}, "",
@@ -180,18 +232,18 @@ func TestRun(t *testing.T) {
 		{"api input from a file", false, []string{"api", "x", "--input", req}, "",
 			0, "gh output\n", []string{"api", "--input=-", "x"}, `{"body":"clean"}`},
 		{"token in api input on standard input", false, []string{"api", "x", "--input", "-"}, `{"body":"` + lc.Bad + `"}`,
-			1, "--input:1: id-prefix\n--input (decoded):1: id-prefix\n", nil, ""},
+			1, "input:1: id-prefix\ninput-decoded:1: id-prefix\n", nil, ""},
 		{"token behind a JSON escape in api input", false, []string{"api", "repos/acme/x/issues/1/comments", "--input", "-"},
-			`{"body":"see ` + strings.Replace(lc.Bad, "-", `\u002d`, 1) + `"}`, 1, "--input (decoded):1: id-prefix\n", nil, ""},
+			`{"body":"see ` + strings.Replace(lc.Bad, "-", `\u002d`, 1) + `"}`, 1, "input-decoded:1: id-prefix\n", nil, ""},
 		// The walk keeps numbers as text, reads every top-level value, and
 		// skips a byte order mark (HSH-9/D8).
 		{"a number past float64 beside a JSON escape in api input", false, []string{"api", "repos/acme/x/issues/1/comments", "--input", "-"},
-			`{"n":1e999,"body":"see ` + esc + `"}`, 1, "--input (decoded):1: id-prefix\n", nil, ""},
+			`{"n":1e999,"body":"see ` + esc + `"}`, 1, "input-decoded:1: id-prefix\n", nil, ""},
 		{"a JSON escape in the second top-level value of api input", false, []string{"api", "x", "--input", "-"},
-			`{"body":"clean"} {"body":"see ` + esc + `"}`, 1, "--input (decoded):1: id-prefix\n", nil, ""},
+			`{"body":"clean"} {"body":"see ` + esc + `"}`, 1, "input-decoded:1: id-prefix\n", nil, ""},
 		{"a JSON escape in api input after a byte order mark", false, []string{"api", "x", "--input", "-"},
-			"\uFEFF" + `{"body":"see ` + esc + `"}`, 1, "--input (decoded):1: id-prefix\n", nil, ""},
-		{"a body file as long as one argument allows", false, []string{"issue", "comment", "5", "-F", edgeFile}, "",
+			"\uFEFF" + `{"body":"see ` + esc + `"}`, 1, "input-decoded:1: id-prefix\n", nil, ""},
+		{"a body as long as one argument allows", false, []string{"issue", "comment", "5", "-b", edge}, "",
 			0, "gh output\n", []string{"issue", "comment", "--body=" + edge, "5"}, ""},
 		{"positional arguments after --", false, []string{"issue", "edit", "-t", "x", "--", "-5"}, "",
 			0, "gh output\n", []string{"issue", "edit", "--title=x", "--", "-5"}, ""},
@@ -200,18 +252,17 @@ func TestRun(t *testing.T) {
 		{"no standard input for gh unless it posts it", false, []string{"issue", "comment", "5", "-b", "x"}, "y\n",
 			0, "gh output\n", []string{"issue", "comment", "--body=x", "5"}, ""},
 		{"several findings, all printed", false, []string{"issue", "create", "-t", lc.Bad, "-b", lc.Near}, "",
-			1, "--title:1: id-prefix\n--body:1: id-prefix\n", nil, ""},
+			1, "title:1: id-prefix\nbody:1: id-prefix\n", nil, ""},
 	} {
-		var out, errs strings.Builder
-		code, err := Run(scanner(t, &out, c.terms), c.args, strings.NewReader(c.stdin), &out, &errs)
+		code, out, errs, err := run(t, c.terms, c.args, c.stdin)
 		ghArgs, ghIn, ran := called(t, dir)
-		if err != nil || code != c.code || out.String() != c.out || errs.Len() != 0 {
-			t.Errorf("%s: exit %d, error %v, stdout %q, stderr %q", c.name, code, err, out.String(), errs.String())
+		if err != nil || code != c.code || out != c.out || errs != "" {
+			t.Errorf("%s: exit %d, error %v, stdout %q, stderr %q", c.name, code, err, out, errs)
 		}
 		if ran != (c.ghArgs != nil) || fmt.Sprintf("%q", ghArgs) != fmt.Sprintf("%q", c.ghArgs) || ghIn != c.ghIn {
 			t.Errorf("%s: gh ran %t with %q and standard input %q", c.name, ran, ghArgs, ghIn)
 		}
-		lc.Check(t, out.String(), errs.String(), fmt.Sprint(err))
+		lc.Check(t, out, errs, fmt.Sprint(err))
 	}
 }
 
@@ -267,7 +318,10 @@ func TestRefused(t *testing.T) {
 		{false, []string{"api", "x", "--input", "-", "-F", "a=@-"}, "{}", "gh api: standard input is named twice"},
 		{false, []string{"issue", "create", "-F", filepath.Join(dir, "missing.md")}, "", "gh issue create: cannot read --body-file"},
 		{false, []string{"api", "x", "-F", lc.Bad + "=@" + filepath.Join(dir, "missing")}, "", "gh api: cannot read --field <redacted>"},
-		{false, []string{"issue", "comment", "5", "-F", over}, "", "gh issue comment: --body-file" + tooLong},
+		{false, []string{"issue", "comment", "5", "-b", strings.Repeat("a", maxArg-len("--body="))}, "",
+			"gh issue comment: --body" + tooLong + "; --body-file has no such limit"},
+		{false, []string{"pr", "comment", "5", "-F", over, "--body-file", over}, "", "gh pr comment: --body-file is given twice"},
+		{false, []string{"api", "x", "--input", over, "--input", over}, "", "gh api: --input is given twice"},
 		{false, []string{"api", "x", "-F", "content=@" + over}, "", "gh api: --field content" + tooLong + "; --input has no such limit"},
 		// gh fills placeholders after the scan (HSH-9/D8).
 		{false, []string{"api", "repos/{owner}/{repo}/issues", "-F", "title=hello", "-F", "body=from {branch}"}, "", "gh api: --field body" + fills},
@@ -287,6 +341,8 @@ func TestRefused(t *testing.T) {
 		{false, []string{"api", "repos/acme/x/git//blobs", "-f", "content=c2Vl", "-f", "encoding=base64"}, "", contents},
 		{false, []string{"api", "-X", "PUT", "repos/acme/x/%63ontents/notes.md", "-f", "content=c2Vl"}, "", contents},
 		{false, []string{"api", "repos/acme/x/issues/1%zz"}, "", "gh api: the endpoint holds a percent sign that is not an escape"},
+		{false, []string{"api", "search/issues?q=100%"}, "", "gh api: the endpoint holds a percent sign that is not an escape"},
+		{false, []string{"api", "search/issues?q=a%00b"}, "", "gh api: endpoint (decoded) holds a NUL byte, so it is not text that hush gh can scan"},
 		{false, []string{"api", "https://example.com/repos/acme/x/releases/1/assets?name=a.gz"}, "",
 			"gh api: an endpoint given as a full URL is not covered by hush gh (give its path)"},
 		{false, []string{"api", "graphql", "-f", "query=mutation { createCommitOnBranch(input: $i) { commit { oid } } }"}, "",
@@ -317,13 +373,12 @@ func TestRefused(t *testing.T) {
 		{false, []string{"issue", "comment", "5", "-F", nul}, "", "gh issue comment: --body-file holds a NUL byte, so it is not text that hush gh can scan"},
 		{false, []string{"pr", "comment", "5", "-F", "-"}, "a\x00b", "gh pr comment: --body-file holds a NUL byte, so it is not text that hush gh can scan"},
 	} {
-		var out, errs strings.Builder
-		code, err := Run(scanner(t, &out, c.terms), c.args, strings.NewReader(c.stdin), &out, &errs)
+		code, out, errs, err := run(t, c.terms, c.args, c.stdin)
 		_, _, ran := called(t, dir)
-		if code != 2 || fmt.Sprint(err) != c.want || out.Len() != 0 || errs.Len() != 0 || ran {
-			t.Errorf("%d args: exit %d, error %v, stdout %q, gh ran %t; want %q", len(c.args), code, err, out.String(), ran, c.want)
+		if code != 2 || fmt.Sprint(err) != c.want || out != "" || errs != "" || ran {
+			t.Errorf("%d args: exit %d, error %v, stdout %q, gh ran %t; want %q", len(c.args), code, err, out, ran, c.want)
 		}
-		lc.Check(t, out.String(), errs.String(), fmt.Sprint(err))
+		lc.Check(t, out, errs, fmt.Sprint(err))
 	}
 }
 
@@ -338,19 +393,17 @@ func TestGHStatus(t *testing.T) {
 		err  string
 	}{{"3", 3, "<nil>"}, {"1", 1, "<nil>"}, {"-1", 2, "gh did not exit normally"}} {
 		t.Setenv("FAKE_GH_EXIT", c.exit)
-		var out strings.Builder
-		code, err := Run(scanner(t, &out, false), args, strings.NewReader(""), &out, &out)
+		code, out, errs, err := run(t, false, args, "")
 		_, _, ran := called(t, dir)
 		if code != c.code || fmt.Sprint(err) != c.err || (c.exit != "-1" && !ran) {
 			t.Errorf("gh exit %s: exit %d, error %v, gh ran %t", c.exit, code, err, ran)
 		}
-		lc.Check(t, out.String(), fmt.Sprint(err))
+		lc.Check(t, out, errs, fmt.Sprint(err))
 	}
 	t.Setenv("PATH", t.TempDir())
-	var out strings.Builder
-	code, err := Run(scanner(t, &out, false), args, strings.NewReader(""), &out, &out)
-	if code != 2 || fmt.Sprint(err) != "cannot find gh on PATH" || out.Len() != 0 {
-		t.Errorf("no gh on PATH: exit %d, error %v, output %q", code, err, out.String())
+	code, out, errs, err := run(t, false, args, "")
+	if code != 2 || fmt.Sprint(err) != "cannot find gh on PATH" || out != "" || errs != "" {
+		t.Errorf("no gh on PATH: exit %d, error %v, output %q", code, err, out)
 	}
 }
 
@@ -417,30 +470,29 @@ func TestKinds(t *testing.T) {
 		for _, f := range strings.Fields(want) {
 			name, kind := f[:len(f)-1], f[len(f)-1]
 			args := append(strings.Fields(cmd), "--"+name)
-			finding, refusal := "--"+name+":1: id-prefix\n", ""
+			finding, refusal := name+":1: id-prefix\n", ""
 			switch kind {
 			case '+':
 				args = append(args, "see "+lc.Bad)
 			case '<':
 				args = append(args, bad)
 			case '~':
-				args, finding = append(args, "k=see "+lc.Bad), "--"+name+" k:1: id-prefix\n"
+				args, finding = append(args, "k=see "+lc.Bad), name+"-1:1: id-prefix\n"
 			case '*':
-				args, finding = append(args, "k=@"+bad), "--"+name+" k:1: id-prefix\n"
+				args, finding = append(args, "k=@"+bad), name+"-1:1: id-prefix\n"
 			case '!':
 				finding, refusal = "", "gh "+cmd+" --"+name+" is not covered by hush gh (see hush gh --help)"
 			}
 			if cmd == "api" {
 				args = append(args, "x")
 			}
-			var out, errs strings.Builder
-			code, err := Run(scanner(t, &out, false), args, strings.NewReader(""), &out, &errs)
+			code, out, errs, err := run(t, false, args, "")
 			_, _, ran := called(t, dir)
-			if ran || out.String() != finding || errs.Len() != 0 || refusal == "" && (code != 1 || err != nil) ||
+			if ran || out != finding || errs != "" || refusal == "" && (code != 1 || err != nil) ||
 				refusal != "" && (code != 2 || fmt.Sprint(err) != refusal) {
-				t.Errorf("%s --%s: exit %d, error %v, stdout %q, gh ran %t", cmd, name, code, err, out.String(), ran)
+				t.Errorf("%s --%s: exit %d, error %v, stdout %q, gh ran %t", cmd, name, code, err, out, ran)
 			}
-			lc.Check(t, out.String(), errs.String(), fmt.Sprint(err))
+			lc.Check(t, out, errs, fmt.Sprint(err))
 		}
 	}
 }

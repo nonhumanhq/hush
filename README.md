@@ -10,8 +10,10 @@ ranges (lines, paths, authors and messages) for two kinds of match:
 
 Findings name the place and the rule, never the matched text.
 
-**hush is pre-release** (ADR-001 and ADR-002, toward v0.1). Every scan names its destination,
-and a public or client scan needs a term file unless it says `--generic-only`:
+hush v0.1 implements ADR-001 and ADR-002; `docs/release-notes/v0.1.md` says what it does and
+its known limits, and `docs/migration.md` takes you from the interim scanner to it. Every scan
+names its destination, and a public or client scan needs a term file unless it says
+`--generic-only`:
 
 ```sh
 go run ./cmd/hush scan --destination public --generic-only .                          # the working tree
@@ -27,16 +29,18 @@ With term sets, hush runs only from a release build of the reviewed repository, 
 committer or tagger, or in a trailer. `--format json` writes one JSON document (`hush.scan/1`).
 `hush scan --help` lists every option.
 
-Two more commands bring the generic tier to agents:
+Two more commands bring the scan to commits and to `gh`:
 
 ```sh
-hush hooks install [--terms FILE] [--identities ADDR]  # pre-commit, commit-msg and pre-push hooks
-hush gh -- pr create -t TITLE -F body.md              # scan what gh would post, then run gh
+hush hooks install --identities ADDR [--terms FILE]  # pre-commit, commit-msg and pre-push hooks
+hush gh --destination public --generic-only -- pr create -t TITLE -F body.md  # scan what gh would post, then run gh
 ```
 
-Git targets need git 2.44 or later, and run it with a fixed environment and no program a
-repository could configure (ADR-001 section 5). The hooks are not to be installed on a clone
-before v0.1, which brings `hush gh` under the same grammar.
+`hush gh` takes `hush scan`'s `--destination`, `--terms`, `--generic-only` and `--identities`
+before `--`, and runs `gh` only after a clean scan. Git targets need git 2.44 or later, and run
+it with a fixed environment and no program a repository could configure (ADR-001 section 5).
+Install the hooks with `--identities`, as the migration guide says, and none before v0.1 is
+tagged.
 
 Exit status: 0 clean, 1 findings, 2 an error, with one line on standard error.
 

@@ -1,5 +1,5 @@
 // Package output writes the plain format: one finding per line,
-// "WHERE:LINE: RULE", and one error line on standard error.
+// "WHERE:LINE: RULE". The command line writes its own error line (HSH-11/D59).
 package output
 
 import (
@@ -7,10 +7,6 @@ import (
 	"io"
 	"strconv"
 )
-
-// Prefix starts every error line (ADR-001 section 6.2; it was the interim
-// scanner's name until HSH-11's part c, HSH-5/D4).
-const Prefix = "hush: "
 
 // Writer prints findings and counts them. Call Flush when the scan ends.
 type Writer struct {
@@ -36,6 +32,3 @@ func Line(where string, line int, rule string) string {
 
 // Flush writes any buffered findings.
 func (o *Writer) Flush() error { return o.w.Flush() }
-
-// Error prints msg as an error line.
-func Error(w io.Writer, msg string) { io.WriteString(w, Prefix+msg+"\n") }

@@ -56,8 +56,9 @@ Everything in this repository may become public. Therefore:
 
 # hush: repo-specific
 
-hush keeps private names out of public records. Until ADR-001 and ADR-002 are accepted it
-is a port of `reference/interim-hush/` at parity, and everything is internal.
+hush keeps private names out of public records. v0.1 implements the accepted ADR-001 and
+ADR-002 (HSH-11); `docs/release-notes/v0.1.md` lists its known limits and `docs/migration.md`
+the move from `reference/interim-hush/`.
 
 ## Build and test
 - Go, standard library only: `go.mod` has no `require` lines, and a test fails if one appears.
@@ -71,13 +72,13 @@ is a port of `reference/interim-hush/` at parity, and everything is internal.
 | Package | Holds |
 | --- | --- |
 | `hush` (module root) | The public package of ADR-001 section 7: destinations, `LoadTermSets`, `Config` and `New`, the scan entry points, findings with path redaction, the report, the JSON writers and the closed error table |
-| `cmd/hush` | `hush scan` (ADR-001 section 7's grammar, over package `hush`), `hush hooks`, `hush gh`, `hush --help`, `hush version`; signals and the one result written per run |
-| `internal/target` | Tree, standard input, git range and git index targets; the only package that runs git or opens scanned files. Reports raw findings to package `hush` through a sink, or prints them as the interim scanner does for `hush gh` until HSH-11's part e |
+| `cmd/hush` | `hush scan` (ADR-001 section 7's grammar, over package `hush`), `hush hooks`, `hush gh` (the same options, over package `hush`), `hush --help`, `hush version`; signals and the one result written per run. Imports no internal package but `internal/hooks` and `internal/ghwrap` |
+| `internal/target` | Tree, standard input, git range and git index targets; the only package that runs git for a scan or opens scanned files. Reports raw findings to package `hush` through a sink; its older printing path serves only its own tests |
 | `internal/rule` | The `Rule` interface, the `id-prefix`, `ip-address` and `email-address` rules and their registry, and the checks and path redaction a rule list gives |
 | `internal/termset` | The term-file parser and matcher; takes bytes, never a path |
-| `internal/output` | The plain finding line, shared with package `hush`, and the error line |
-| `internal/hooks` | The git hooks `hush hooks` writes and removes; CLI only |
-| `internal/ghwrap` | What `hush gh` covers, reading a `gh` command line, and the one launch of `gh`; CLI only |
+| `internal/output` | The plain finding line, shared with package `hush` |
+| `internal/hooks` | The git hooks `hush hooks` writes and removes, and the installer's own git, with the caller's configuration; CLI only, imports only `hush` |
+| `internal/ghwrap` | What `hush gh` covers, reading a `gh` command line, the scan of each text through package `hush`, and the one launch of `gh`; CLI only, imports only `hush` |
 | `internal/leakcheck` | Synthetic terms and tokens, and the leak check every test uses |
 | `internal/schema` | The closed check of ADR-001 section 6.3's JSON document; tests only |
 
@@ -90,3 +91,9 @@ is a port of `reference/interim-hush/` at parity, and everything is internal.
   in the PR. `TestParity` maps the interim's arguments as ADR-001's Consequences table says and
   compares exit status and standard output; standard error is checked against the message table.
 - A JSON document a test prints passes `schema.CheckLine`.
+- `TestArchitecture` (`arch_test.go`) holds ADR-001 sections 2 and 6.6: imports, environment
+  reads, child processes, output, panic recovery, foreign errors and the formatting guards, each
+  with a planted violation. A file behind the `hushpanic` build tag injects a panic for
+  `TestNegative6InjectedPanic`; no other build holds it.
+- The release notes and the migration guide have tests (`docs_test.go`); a limit the notes
+  list is pinned there.

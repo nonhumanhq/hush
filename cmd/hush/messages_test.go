@@ -11,8 +11,20 @@ import (
 	"testing"
 
 	lc "github.com/nonhumanhq/hush/internal/leakcheck"
+	"github.com/nonhumanhq/hush/internal/rule"
 	"github.com/nonhumanhq/hush/internal/termset"
 )
+
+// The help text's rule names are the registry's, in its order (HSH-11/D59).
+func TestRuleNames(t *testing.T) {
+	var names []string
+	for _, r := range rule.Registry(nil) {
+		names = append(names, r.Name())
+	}
+	if strings.Join(names, " ") != strings.Join(ruleNames, " ") {
+		t.Errorf("ruleNames %q, the registry %q", ruleNames, names)
+	}
+}
 
 // table returns the patterns of every message hush scan may print after
 // "hush: ": package hush's table, read from errors.go so that a message added

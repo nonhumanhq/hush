@@ -10,6 +10,16 @@ import (
 	"strings"
 )
 
+// Error is a refusal or failure of hush hooks: fixed text that the CLI
+// prints as its error line. Every error this package returns is one, and
+// holds no path, value or another program's output (ADR-001 section 6.6).
+type Error struct{ msg string }
+
+func (e *Error) Error() string { return e.msg }
+
+// refuse returns an *Error with the fixed text msg.
+func refuse(msg string) error { return &Error{msg: msg} }
+
 // Names lists the hooks Install writes, in order.
 var Names = []string{"pre-commit", "commit-msg", "pre-push"}
 
@@ -100,11 +110,11 @@ func Install(dir, exe, terms, identities string, force bool) error {
 			return err
 		}
 		if exists && !ours && !force {
-			return errors.New("the " + name + " hook was not written by hush (give --force to replace it)")
+			return refuse("the " + name + " hook was not written by hush (give --force to replace it)")
 		}
 	}
 	if os.MkdirAll(dir, 0o755) != nil {
-		return errors.New("cannot create the hooks directory")
+		return refuse("cannot create the hooks directory")
 	}
 	for _, name := range Names {
 		if err := write(dir, name, Script(name, exe, terms, identities)); err != nil {
@@ -125,7 +135,7 @@ func Uninstall(dir string) (removed, left []string, err error) {
 			return removed, left, err
 		case ours:
 			if os.Remove(path) != nil {
-				return removed, left, errors.New("cannot remove the " + name + " hook")
+				return removed, left, refuse("cannot remove the " + name + " hook")
 			}
 			removed = append(removed, name)
 		case exists:
@@ -143,14 +153,14 @@ func owner(path string) (exists, ours bool, err error) {
 		return false, false, nil
 	}
 	if err != nil {
-		return false, false, errors.New("cannot read the hooks directory")
+		return false, false, refuse("cannot read the hooks directory")
 	}
 	if !fi.Mode().IsRegular() {
 		return true, false, nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return true, false, errors.New("cannot read a hook in the hooks directory")
+		return true, false, refuse("cannot read a hook in the hooks directory")
 	}
 	lines := strings.SplitN(string(data), "\n", 3)
 	return true, len(lines) == 3 && lines[1] == marker, nil
@@ -159,7 +169,7 @@ func owner(path string) (exists, ours bool, err error) {
 // write puts text at dir/name through a temporary file and a rename, so a
 // symlink at that path is replaced rather than followed.
 func write(dir, name, text string) error {
-	bad := errors.New("cannot write the " + name + " hook")
+	bad := refuse("cannot write the " + name + " hook")
 	f, err := os.CreateTemp(dir, "."+name+".hush-*")
 	if err != nil {
 		return bad

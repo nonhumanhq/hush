@@ -8,7 +8,7 @@ import (
 )
 
 func TestFormat(t *testing.T) {
-	var out, errs strings.Builder
+	var out strings.Builder
 	o := New(&out)
 	o.Finding("docs/a.md", 3, "id-prefix")
 	o.Finding("0123456789ab:(commit)", 6, "set:clients")
@@ -16,10 +16,9 @@ func TestFormat(t *testing.T) {
 	if err := o.Flush(); err != nil || o.Found != 3 {
 		t.Fatalf("flush: %v, found %d", err, o.Found)
 	}
-	Error(&errs, "bad --range")
 	want := "docs/a.md:3: id-prefix\n0123456789ab:(commit):6: set:clients\ndocs/<redacted>:0: set:people in path\n"
-	if out.String() != want || errs.String() != "hush: bad --range\n" {
-		t.Errorf("got %q and %q", out.String(), errs.String())
+	if out.String() != want {
+		t.Errorf("got %q", out.String())
 	}
-	leakcheck.Check(t, out.String(), errs.String())
+	leakcheck.Check(t, out.String())
 }

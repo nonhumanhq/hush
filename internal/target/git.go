@@ -433,3 +433,10 @@ var (
 	errMissing   = errors.New("missing object")
 	errBadObject = errors.New("bad object")
 )
+
+// within reports whether path is dir or lies below it. Both are absolute, with
+// symlinks resolved. internal/hooks keeps its own copy for the hooks directory.
+func within(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}

@@ -28,9 +28,10 @@ const (
 	msgAllowAlone    = "--allow-empty-range needs --range"
 )
 
-// cliMessages lists the messages above, for the tests.
+// cliMessages lists the messages above and hush gh's (gh.go), for the tests.
 var cliMessages = []string{msgUnknownOption, msgMissingValue, msgGivenTwice, msgAfterPath, msgHelpAlone,
-	msgUnknownFormat, msgNoDest, msgTargets, msgDirAlone, msgLabelAlone, msgAllowAlone}
+	msgUnknownFormat, msgNoDest, msgTargets, msgDirAlone, msgLabelAlone, msgAllowAlone,
+	msgGHDashes, msgGHUnknownOption, msgGHMissingValue, msgGHNoDest}
 
 // at returns msg with "#" replaced by the position n.
 func at(msg string, n int) string { return strings.Replace(msg, "#", strconv.Itoa(n), 1) }
@@ -164,28 +165,7 @@ func (p *process) scanCommand(ctx context.Context, args []string) int {
 		p.owe(dest, cov, tgt)
 	}
 
-	// The combination of --terms, --generic-only and the destination is an
-	// argument check, made before the term file is read: an empty TermSets
-	// stands for the file, and New refuses the combination or reports that
-	// the sets were not loaded (HSH-11/D42).
-	probe := cfg
-	if a.terms.given() {
-		probe.Terms = new(hush.TermSets)
-	}
-	if _, err := hush.New(probe); err != nil && !(a.terms.given() && errors.Is(err, hush.ErrTermFile)) {
-		return p.failError(err)
-	}
-	if a.terms.given() {
-		// Before the term file is read, a crash leaves no core file.
-		limitCore()
-		if cfg.Terms, err = hush.LoadTermSets(a.terms.value); err != nil {
-			return p.failError(err)
-		}
-	}
-	s, err := hush.New(cfg)
-	if errors.Is(err, hush.ErrDestination) {
-		err = withArgument(err, a.dest.pos)
-	}
+	s, err := newScanner(cfg, a.terms, a.dest)
 	if err != nil {
 		return p.failError(err)
 	}
@@ -232,6 +212,36 @@ func (p *process) scanCommand(ctx context.Context, args []string) int {
 		}
 	}
 	return p.report(rep, err, a.format.value == "json")
+}
+
+// newScanner returns the Scanner cfg describes, with the term file named by
+// terms loaded into it when that option is given; dest is the --destination
+// option, whose position a client-label error cites. The combination of
+// --terms, --generic-only and the destination is an argument check, made
+// before the term file is read: an empty TermSets stands for the file, and New
+// refuses the combination or reports that the sets were not loaded
+// (HSH-11/D42). hush scan and hush gh share it.
+func newScanner(cfg hush.Config, terms, dest option) (*hush.Scanner, error) {
+	probe := cfg
+	if terms.given() {
+		probe.Terms = new(hush.TermSets)
+	}
+	if _, err := hush.New(probe); err != nil && !(terms.given() && errors.Is(err, hush.ErrTermFile)) {
+		return nil, err
+	}
+	if terms.given() {
+		// Before the term file is read, a crash leaves no core file.
+		limitCore()
+		var err error
+		if cfg.Terms, err = hush.LoadTermSets(terms.value); err != nil {
+			return nil, err
+		}
+	}
+	s, err := hush.New(cfg)
+	if errors.Is(err, hush.ErrDestination) {
+		err = withArgument(err, dest.pos)
+	}
+	return s, err
 }
 
 // indexFile returns GIT_INDEX_FILE, which the CLI reads only for --index, or

@@ -16,15 +16,14 @@ import (
 	"syscall"
 
 	"github.com/nonhumanhq/hush"
-	"github.com/nonhumanhq/hush/internal/output"
-	"github.com/nonhumanhq/hush/internal/rule"
 )
 
 const usage = `usage: hush scan --destination DEST [--terms FILE | --generic-only]
                  [--identities ADDR[,ADDR...]] [--format plain|json] TARGET
        hush hooks install [--force] [--terms FILE] [--identities ADDR[,ADDR...]]
        hush hooks uninstall
-       hush gh -- GH-ARGUMENTS
+       hush gh --destination DEST [--terms FILE | --generic-only]
+               [--identities ADDR[,ADDR...]] -- GH-ARGUMENTS
        hush version
 
 hush keeps private names out of public records. "hush scan" scans files, the
@@ -35,13 +34,15 @@ pushes. "hush gh" scans the text a gh command would post before it runs gh.
 the version.
 `
 
-// scanUsage returns "hush scan --help", with the rules named from the
-// registry (HSH-11/D26). It prints no flagged token and no address.
+// ruleNames names the generic rules in registry order, for the help text. The
+// CLI reaches no internal package but internal/hooks and internal/ghwrap
+// (ADR-001 section 2), so the names are written here, and TestRuleNames holds
+// them to the registry (HSH-11/D26, D59).
+var ruleNames = []string{"id-prefix", "ip-address", "email-address"}
+
+// scanUsage returns "hush scan --help", with the rules named in registry
+// order (HSH-11/D26). It prints no flagged token and no address.
 func scanUsage() string {
-	var names []string
-	for _, r := range genericRules() {
-		names = append(names, r.Name())
-	}
 	return `usage: hush scan --destination DEST [--terms FILE | --generic-only]
                  [--identities ADDR[,ADDR...]] [--format plain|json] TARGET
 
@@ -83,7 +84,7 @@ func scanUsage() string {
 Every option comes before the first path and takes the next argument as its
 value. --help is accepted only alone.
 
-Rules: ` + strings.Join(names, ", ") + `, and set:NAME for a term set.
+Rules: ` + strings.Join(ruleNames, ", ") + `, and set:NAME for a term set.
 
 Findings: one per line, WHERE:LINE: RULE, with " in path" when the path itself
 broke the rule. Line 0 is the path or the whole file. A path component that
@@ -155,7 +156,7 @@ func (p *process) run(ctx context.Context, args []string) (code int) {
 			defer p.mu.Unlock()
 			if p.writing { // the claimant panicked while writing its result
 				p.writing = false
-				output.Error(p.stderr, msgInternal)
+				errorLine(p.stderr, msgInternal)
 			}
 		}
 	}()
@@ -167,7 +168,7 @@ func (p *process) run(ctx context.Context, args []string) (code int) {
 	case args[0] == "hooks":
 		return p.hooksCommand(args[1:])
 	case args[0] == "gh":
-		return p.ghCommand(args[1:])
+		return p.ghCommand(ctx, args[1:])
 	case (args[0] == "-h" || args[0] == "--help") && len(args) == 1:
 		return p.text(usage)
 	case args[0] == "-h" || args[0] == "--help":
@@ -213,7 +214,7 @@ func (p *process) done(code int, msg string) int {
 	if p.writing {
 		p.writing = false
 		if msg != "" {
-			output.Error(p.stderr, msg)
+			errorLine(p.stderr, msg)
 		}
 	}
 	return code
@@ -310,9 +311,9 @@ func (p *process) interrupt() {
 	switch {
 	case !p.ended:
 		p.ended = true
-		output.Error(p.stderr, p.writeError(hush.ErrInterrupted))
+		errorLine(p.stderr, p.writeError(hush.ErrInterrupted))
 	case p.writing:
-		output.Error(p.stderr, hush.ErrInterrupted.Error())
+		errorLine(p.stderr, hush.ErrInterrupted.Error())
 	default:
 		p.mu.Unlock()
 		return
@@ -320,9 +321,11 @@ func (p *process) interrupt() {
 	os.Exit(2)
 }
 
-// genericRules returns the generic tier, which hush gh applies until it scans
-// through package hush (HSH-9/D12), and which scan's help text names.
-func genericRules() rule.List { return rule.Registry(nil) }
+// errorPrefix starts every error line (ADR-001 section 6.2).
+const errorPrefix = "hush: "
+
+// errorLine writes msg to w as one error line.
+func errorLine(w io.Writer, msg string) { io.WriteString(w, errorPrefix+msg+"\n") }
 
 // version returns "hush", the module version and, when the build records
 // one, the VCS revision.

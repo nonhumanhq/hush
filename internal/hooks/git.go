@@ -1,8 +1,6 @@
-package target
+package hooks
 
 import (
-	"errors"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -11,7 +9,10 @@ import (
 // hookGit runs git for hush hooks, in the repository at repo ("" for the
 // current directory), with the caller's environment: unlike a scan, the
 // installer must see the caller's own configuration, where core.hooksPath is
-// often set (HSH-9/D3, HSH-11/D51). It returns git's standard output.
+// often set (HSH-9/D3, HSH-11/D51). It returns git's standard output. It is
+// the one place outside a scan that runs git, and it moved here from
+// internal/target in part e, so that the CLI reaches internal/target only
+// through package hush (HSH-11/D59).
 func hookGit(repo string, args ...string) ([]byte, error) {
 	if repo != "" {
 		args = append([]string{"-C", repo}, args...)
@@ -24,12 +25,12 @@ func hookGit(repo string, args ...string) ([]byte, error) {
 // core.hooksPath and linked worktrees (HSH-9/D3).
 func HooksDir(repo string) (string, error) {
 	if _, err := hookGit(repo, "rev-parse", "--git-dir"); err != nil {
-		return "", fail(NotRepository, "not a git repository")
+		return "", refuse("not a git repository")
 	}
 	out, err := hookGit(repo, "rev-parse", "--path-format=absolute", "--git-path", "hooks")
 	dir := strings.TrimSuffix(string(out), "\n")
 	if err != nil || dir == "" {
-		return "", errors.New("cannot find the hooks directory")
+		return "", refuse("cannot find the hooks directory")
 	}
 	return dir, nil
 }
@@ -45,11 +46,11 @@ func InWorkTree(repo, path string) (bool, error) {
 		if bare, _ := hookGit(repo, "rev-parse", "--is-bare-repository"); string(bare) == "true\n" {
 			return false, nil
 		}
-		return false, errors.New("cannot find the work tree")
+		return false, refuse("cannot find the work tree")
 	}
 	common, err := hookGit(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
-		return false, errors.New("cannot find the git directory")
+		return false, refuse("cannot find the git directory")
 	}
 	return within(path, strings.TrimSuffix(string(top), "\n")) &&
 		!within(path, strings.TrimSuffix(string(common), "\n")), nil
@@ -60,14 +61,4 @@ func InWorkTree(repo, path string) (bool, error) {
 func within(path, dir string) bool {
 	rel, err := filepath.Rel(dir, path)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// ReadFile returns the contents of a file that the caller scans and passes
-// on, such as a body file hush gh hands to gh as text (HSH-9/D9).
-func ReadFile(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, errors.New("cannot read a file")
-	}
-	return data, nil
 }

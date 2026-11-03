@@ -1,9 +1,12 @@
 // Package ghwrap runs gh only after scanning the text the gh command would
-// post (HSH-9/D6 to D11). It is used by the CLI only.
+// post (HSH-9/D6 to D11). It scans only through package hush, with the
+// Scanner the CLI builds from hush gh's options (HSH-11/D8 to D10), and it is
+// used by the CLI only.
 package ghwrap
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,8 +19,18 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/nonhumanhq/hush/internal/target"
+	"github.com/nonhumanhq/hush"
 )
+
+// Error is a refusal or failure of hush gh's own: fixed text, with argument
+// positions and words that may print, which the CLI prints as its error line
+// (ADR-001 section 6.6). Run returns it, or a *hush.Error from a scan.
+type Error struct{ msg string }
+
+func (e *Error) Error() string { return e.msg }
+
+// refuse returns an *Error with the text msg.
+func refuse(msg string) error { return &Error{msg: msg} }
 
 // tables holds the flags of each command hush gh scans, as gh 2.101.0
 // documents them (HSH-9/D7). Each entry is [SHORT:]NAME and a kind:
@@ -123,31 +136,55 @@ type call struct {
 	texts    []text   // what gh would post, in order
 }
 
+// text is one text gh would post: the label its findings carry (HSH-11/D8),
+// the flag a message names it by, and its bytes.
 type text struct {
-	where string
-	data  []byte
+	label, where string
+	data         []byte
 }
 
-// Run scans, through s, the text the gh command in args would post. Only if s
-// finds nothing does it run the real gh, once, with exactly the bytes it
-// scanned. It returns 1 on findings and otherwise gh's exit status. An error
-// is fixed text, and means exit 2: gh did not run, or did not exit normally.
-func Run(s *target.Scan, args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
-	c, err := prepare(args, stdin, s.Breaks)
-	if err != nil {
-		return 2, err
+// Run scans, through s, each text the gh command in args would post, as a
+// buffer under its label. With findings, it returns 1 and the reports that
+// hold them, in order, and runs nothing. Only when every text scans clean does
+// it run the real gh, once, with exactly the bytes it scanned, and return gh's
+// exit status. An error means exit 2, with no report: an *Error, hush gh's own
+// refusal or failure (gh did not run, or did not exit normally), or the
+// *hush.Error a scan returned.
+func Run(ctx context.Context, s *hush.Scanner, args []string, stdin io.Reader, stdout, stderr io.Writer) (int, []*hush.Report, error) {
+	// A word may print in a message when hush would take it as a stdin
+	// label: the label grammar, no term of any loaded set, no client label
+	// and nothing a generic rule flags (HSH-11/D35, D60).
+	breaks := func(word string) bool {
+		_, err := s.ScanBytes(ctx, word, nil)
+		return err != nil
 	}
+	c, err := prepare(args, stdin, breaks)
+	if err != nil {
+		return 2, nil, err
+	}
+	var found []*hush.Report
 	for _, t := range c.texts {
-		if err := s.Stdin(bytes.NewReader(t.data), t.where); err != nil {
-			return 2, err
+		rep, err := s.ScanBytes(ctx, t.label, t.data)
+		var fe *hush.FindingsError
+		switch {
+		case errors.As(err, &fe):
+			found = append(found, rep)
+		case err != nil:
+			return 2, nil, err // no partial report (HSH-11/D17)
 		}
 	}
-	if s.Out.Found > 0 {
-		return 1, nil
+	if len(found) > 0 {
+		return 1, found, nil
 	}
+	code, err := launch(c, stdout, stderr)
+	return code, nil, err
+}
+
+// launch runs the real gh, found on PATH, once, as c says.
+func launch(c *call, stdout, stderr io.Writer) (int, error) {
 	gh, err := exec.LookPath("gh")
 	if err != nil {
-		return 2, errors.New("cannot find gh on PATH")
+		return 2, refuse("cannot find gh on PATH")
 	}
 	cmd := exec.Command(gh, c.args...)
 	// The inherited environment, which gh needs to authenticate, with
@@ -166,16 +203,16 @@ func Run(s *target.Scan, args []string, stdin io.Reader, stdout, stderr io.Write
 	case errors.As(err, &ee) && ee.ExitCode() > 0:
 		return ee.ExitCode(), nil
 	case errors.As(err, &ee):
-		return 2, errors.New("gh did not exit normally")
+		return 2, refuse("gh did not exit normally")
 	}
-	return 2, errors.New("cannot run gh")
+	return 2, refuse("cannot run gh")
 }
 
 // prepare reads args as gh would and returns the call to make and the texts to
 // scan first. Files and standard input are read here, once.
 func prepare(args []string, stdin io.Reader, breaks func(string) bool) (*call, error) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		return nil, errors.New("give a gh command after -- (see hush gh --help)")
+		return nil, refuse("give a gh command after -- (see hush gh --help)")
 	}
 	n := 2 // "group command", or "api" alone
 	if args[0] == "api" {
@@ -188,7 +225,7 @@ func prepare(args []string, stdin io.Reader, breaks func(string) bool) (*call, e
 		if !isGroup(args[0]) {
 			return nil, notCovered(args[:1], breaks)
 		}
-		return nil, errors.New("gh " + named(args[:n-1], breaks) + ": give the command before any flag (see hush gh --help)")
+		return nil, refuse("gh " + named(args[:n-1], breaks) + ": give the command before any flag (see hush gh --help)")
 	}
 	cmd := strings.Join(args[:n], " ")
 	if readOnly[cmd] {
@@ -216,23 +253,28 @@ func prepare(args []string, stdin io.Reader, breaks func(string) bool) (*call, e
 	read := func(path, what string) ([]byte, error) {
 		if path == "-" {
 			if readStdin {
-				return nil, errors.New(label + ": standard input is named twice")
+				return nil, refuse(label + ": standard input is named twice")
 			}
 			readStdin = true
 			data, err := io.ReadAll(stdin)
 			if err != nil {
-				return nil, errors.New(label + ": cannot read standard input")
+				return nil, refuse(label + ": cannot read standard input")
 			}
 			return data, nil
 		}
-		data, err := target.ReadFile(path)
+		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil, errors.New(label + ": cannot read " + what)
+			return nil, refuse(label + ": cannot read " + what)
 		}
 		return data, nil
 	}
+	fields := 0 // --field and --raw-field values so far, for their labels
 	// use records one flag with its value, in the form gh will get.
 	use := func(f *flag, value string, hasValue bool) error {
+		if f.kind == '<' && seen[f.name] {
+			// Its contents go on gh's standard input, which holds one text.
+			return refuse(label + ": --" + f.name + " is given twice")
+		}
 		seen[f.name] = true
 		arg, where := "--"+f.name, "--"+f.name
 		switch f.kind {
@@ -246,30 +288,34 @@ func prepare(args []string, stdin io.Reader, breaks func(string) bool) (*call, e
 			}
 			arg += "=" + value
 		case '+':
-			c.texts = append(c.texts, text{"--" + f.name, []byte(value)})
+			c.texts = append(c.texts, text{f.name, where, []byte(value)})
 			arg += "=" + value
 		case '<':
 			data, err := read(value, "--"+f.name)
 			if err != nil {
 				return err
 			}
-			c.texts = append(c.texts, text{"--" + f.name, data})
+			c.texts = append(c.texts, text{f.name, where, data})
+			// gh reads --input, and --body-file given as "-", from its
+			// standard input, which no other flag of these commands names,
+			// so the scanned bytes go there, whatever their length
+			// (HSH-9/D9, HSH-11/D9).
+			c.stdin, c.useStdin = data, true
+			arg += "=-"
 			if f.name == "input" {
 				// The checks below see an invalid byte only where the JSON walk
 				// reaches it, so an --input that is not UTF8 is refused first
 				// (HSH-9/D8).
 				if !utf8.Valid(data) {
-					return errors.New(label + ": --input is not valid UTF8, so it is not text that hush gh can scan")
+					return refuse(label + ": --input is not valid UTF8, so it is not text that hush gh can scan")
 				}
-				c.stdin, c.useStdin = data, true
-				arg += "=-"
 				// GitHub decodes the escapes in a JSON body, which the raw
 				// bytes hide, so its decoded strings are scanned too. Where
 				// the walk stops early, an escape after that point could
 				// hide text, so a backslash means a refusal (HSH-9/D8).
 				strs, whole := decoded(data)
 				if !whole && bytes.IndexByte(data, '\\') >= 0 {
-					return errors.New(label + ": --input holds an escape but is not JSON hush can read")
+					return refuse(label + ": --input holds an escape but is not JSON hush can read")
 				}
 				// A lone surrogate escape decodes to U+FFFD, which hides whatever
 				// a server that drops it would post, so the decoded strings may
@@ -279,15 +325,14 @@ func prepare(args []string, stdin io.Reader, breaks func(string) bool) (*call, e
 					n += strings.Count(s, "\uFFFD")
 				}
 				if n > bytes.Count(data, []byte("\uFFFD")) {
-					return errors.New(label + ": --input holds an escape or a byte that decodes to U+FFFD")
+					return refuse(label + ": --input holds an escape or a byte that decodes to U+FFFD")
 				}
 				for _, s := range strs {
-					c.texts = append(c.texts, text{"--input (decoded)", []byte(s)})
+					c.texts = append(c.texts, text{"input-decoded", "--input (decoded)", []byte(s)})
 				}
-			} else {
-				arg = "--" + strings.TrimSuffix(f.name, "-file") + "=" + string(data)
 			}
 		case '~', '*':
+			fields++
 			key, v, _ := strings.Cut(value, "=")
 			where += " " + safe(key, breaks)
 			if f.kind == '*' && strings.HasPrefix(v, "@") {
@@ -297,29 +342,32 @@ func prepare(args []string, stdin io.Reader, breaks func(string) bool) (*call, e
 				}
 				value, arg = key+"="+string(data), "--raw-field" // gh reads both as the same string
 			} else if f.kind == '*' && fills(v, false) {
-				return errors.New(label + ": " + where + " holds {owner}, {repo} or {branch}, or :owner, :repo or :branch, " +
+				return refuse(label + ": " + where + " holds {owner}, {repo} or {branch}, or :owner, :repo or :branch, " +
 					"which gh fills in after the scan; give it with --raw-field, which fills nothing")
 			}
-			c.texts = append(c.texts, text{where, []byte(value)})
+			c.texts = append(c.texts, text{f.name + "-" + strconv.Itoa(fields), where, []byte(value)})
 			arg += "=" + value
 		}
 		if len(arg) >= maxArg {
 			msg := label + ": " + where + " is too long for one argument to gh (128 KiB at most)"
-			if args[0] == "api" {
+			switch {
+			case args[0] == "api":
 				msg += "; --input has no such limit"
+			case f.name == "body":
+				msg += "; --body-file has no such limit"
 			}
-			return errors.New(msg)
+			return refuse(msg)
 		}
 		flagArgs = append(flagArgs, arg)
 		return nil
 	}
 	refused := func(f *flag) error {
-		return errors.New(label + " --" + f.name + " is not covered by hush gh (see hush gh --help)")
+		return refuse(label + " --" + f.name + " is not covered by hush gh (see hush gh --help)")
 	}
 	unknown := func(i int) error {
-		return errors.New(label + ": argument " + strconv.Itoa(n+i+1) + " is a flag hush gh does not know (see hush gh --help)")
+		return refuse(label + ": argument " + strconv.Itoa(n+i+1) + " is a flag hush gh does not know (see hush gh --help)")
 	}
-	needs := func(f *flag) error { return errors.New(label + ": --" + f.name + " needs a value") }
+	needs := func(f *flag) error { return refuse(label + ": --" + f.name + " needs a value") }
 
 	// Parse the rest as gh's flag parser does: --NAME=VALUE, --NAME VALUE,
 	// -X VALUE, -XVALUE, -X=VALUE and booleans grouped as -XY, with flags
@@ -381,24 +429,34 @@ func prepare(args []string, stdin io.Reader, breaks func(string) bool) (*call, e
 		}
 	}
 	if seen["body"] && seen["body-file"] {
-		return nil, errors.New(label + ": give --body or --body-file, not both") // as gh refuses them
+		return nil, refuse(label + ": give --body or --body-file, not both") // as gh refuses them
 	}
 	if args[0] == "api" {
 		if err := checkAPI(label, pos, method, seen["field"] || seen["raw-field"] || seen["input"]); err != nil {
 			return nil, err
 		}
 		for _, p := range pos {
-			c.texts = append(c.texts, text{"endpoint", []byte(p)})
+			c.texts = append(c.texts, text{"endpoint", "endpoint", []byte(p)})
+			// GitHub decodes the endpoint's percent-escapes, in its query
+			// too, where "+" is also a space, so the decoded text is scanned
+			// as well when it differs (HSH-11/D10).
+			d, err := decodeEndpoint(p)
+			if err != nil {
+				return nil, refuse(label + ": the endpoint holds a percent sign that is not an escape")
+			}
+			if d != p {
+				c.texts = append(c.texts, text{"endpoint-decoded", "endpoint (decoded)", []byte(d)})
+			}
 		}
 		for _, t := range c.texts {
 			if bytes.Contains(t.data, []byte("createCommitOnBranch")) {
-				return nil, errors.New(label + ": createCommitOnBranch sends file contents as base64, which hush gh cannot scan")
+				return nil, refuse(label + ": createCommitOnBranch sends file contents as base64, which hush gh cannot scan")
 			}
 		}
 	}
 	for _, t := range c.texts {
 		if bytes.IndexByte(t.data, 0) >= 0 {
-			return nil, errors.New(label + ": " + t.where + " holds a NUL byte, so it is not text that hush gh can scan")
+			return nil, refuse(label + ": " + t.where + " holds a NUL byte, so it is not text that hush gh can scan")
 		}
 	}
 	c.args = append(append([]string{}, args[:n]...), flagArgs...)
@@ -431,6 +489,19 @@ func decoded(data []byte) (strs []string, whole bool) {
 	}
 }
 
+// decodeEndpoint decodes an endpoint as GitHub reads it: the path before the
+// first "?" with its percent-escapes, and the query after it as a query
+// string, where "+" is a space as well (HSH-11/D10).
+func decodeEndpoint(p string) (string, error) {
+	pathPart, query, hasQuery := strings.Cut(p, "?")
+	d, err := url.PathUnescape(pathPart)
+	if err != nil || !hasQuery {
+		return d, err
+	}
+	q, err := url.QueryUnescape(query)
+	return d + "?" + q, err
+}
+
 // checkAPI refuses a gh api endpoint whose text gh changes, or whose payload
 // GitHub decodes, after hush gh has scanned it (HSH-9/D7, D8): a full URL, a
 // write to the contents or git blobs API, which take file contents as base64,
@@ -445,16 +516,16 @@ func checkAPI(label string, pos []string, method string, params bool) error {
 		typed, _, _ = strings.Cut(typed, "#")
 		unescaped, err := url.PathUnescape(typed)
 		if err != nil {
-			return errors.New(label + ": the endpoint holds a percent sign that is not an escape")
+			return refuse(label + ": the endpoint holds a percent sign that is not an escape")
 		}
 		path := strings.ToLower(path.Clean("/" + unescaped))
 		switch {
 		case strings.Contains(p, "://"):
-			return errors.New(label + ": an endpoint given as a full URL is not covered by hush gh (give its path)")
+			return refuse(label + ": an endpoint given as a full URL is not covered by hush gh (give its path)")
 		case !get && (strings.Contains("/"+path+"/", "/contents/") || strings.HasSuffix(strings.TrimRight(path, "/"), "/git/blobs")):
-			return errors.New(label + ": a write to the contents or git blobs API sends file contents as base64, which hush gh cannot scan")
+			return refuse(label + ": a write to the contents or git blobs API sends file contents as base64, which hush gh cannot scan")
 		case fills(p, true):
-			return errors.New(label + ": the endpoint holds {branch} or :branch, which gh fills in after the scan")
+			return refuse(label + ": the endpoint holds {branch} or :branch, which gh fills in after the scan")
 		}
 	}
 	return nil
@@ -477,7 +548,7 @@ func isGroup(word string) bool {
 }
 
 func notCovered(words []string, breaks func(string) bool) error {
-	return errors.New("gh " + named(words, breaks) + " is not covered by hush gh (see hush gh --help)")
+	return refuse("gh " + named(words, breaks) + " is not covered by hush gh (see hush gh --help)")
 }
 
 // named returns words joined by spaces, each passed through safe.

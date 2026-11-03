@@ -11,8 +11,6 @@ import (
 
 	"github.com/nonhumanhq/hush"
 	"github.com/nonhumanhq/hush/internal/hooks"
-	"github.com/nonhumanhq/hush/internal/output"
-	"github.com/nonhumanhq/hush/internal/target"
 )
 
 const hooksUsage = `usage: hush hooks install [--force] [--terms FILE] [--identities ADDR[,ADDR...]]
@@ -96,19 +94,19 @@ func (p *process) hooksInstall(terms, identities string, force bool) int {
 	}
 	// The hooks hold absolute paths, so they must not land where they could be
 	// committed (HSH-9/D14).
-	dir, err := target.HooksDir("")
+	dir, err := hooks.HooksDir("")
 	inTree := false
 	if err == nil {
-		inTree, err = target.InWorkTree("", dir)
+		inTree, err = hooks.InWorkTree("", dir)
 	}
 	if err == nil && inTree && !force {
-		err = errors.New("the hooks directory is inside the work tree, and the hooks hold absolute paths that must not be committed (give --force to install them there)")
+		return p.fail("the hooks directory is inside the work tree, and the hooks hold absolute paths that must not be committed (give --force to install them there)")
 	}
 	if err == nil {
 		err = hooks.Install(dir, exe, terms, identities, force)
 	}
 	if err != nil {
-		return p.fail(err.Error())
+		return p.failHooks(err)
 	}
 	var b strings.Builder
 	for _, name := range hooks.Names {
@@ -116,7 +114,7 @@ func (p *process) hooksInstall(terms, identities string, force bool) int {
 	}
 	code := p.text(b.String())
 	if inTree {
-		output.Error(p.stderr, "warning: the hooks directory is inside the work tree; the hooks hold absolute paths and must not be committed")
+		errorLine(p.stderr, "warning: the hooks directory is inside the work tree; the hooks hold absolute paths and must not be committed")
 	}
 	return code
 }
@@ -150,9 +148,9 @@ func hushPath() (string, error) {
 // hooksUninstall removes the hooks hush wrote for the repository in the
 // current directory.
 func (p *process) hooksUninstall() int {
-	dir, err := target.HooksDir("")
+	dir, err := hooks.HooksDir("")
 	if err != nil {
-		return p.fail(err.Error())
+		return p.failHooks(err)
 	}
 	removed, left, err := hooks.Uninstall(dir)
 	var b strings.Builder
@@ -164,7 +162,18 @@ func (p *process) hooksUninstall() int {
 	}
 	if err != nil {
 		io.WriteString(p.stdout, b.String())
-		return p.fail(err.Error())
+		return p.failHooks(err)
 	}
 	return p.text(b.String())
+}
+
+// failHooks writes the text of an error from internal/hooks, whose errors are
+// fixed text, and the fixed internal message for any other error, which it
+// never formats (ADR-001 section 6.6).
+func (p *process) failHooks(err error) int {
+	var e *hooks.Error
+	if errors.As(err, &e) && e != nil {
+		return p.fail(e.Error())
+	}
+	return p.failError(nil)
 }
