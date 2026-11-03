@@ -42,6 +42,8 @@ Everything in this repository may become public. Therefore:
    Add each new decision to PLAN.md as the next D#. Elsewhere, write them as `<ID>/T3` and
    `<ID>/D2`; they never become issues.
 4. Tests must pass. Do not mark anything done that is stubbed; say so in PROGRESS.md.
+   When you write that something was checked, commit the program that checks it under
+   `.work/<ID>/checks/` with the command that runs it, or call the claim unchecked.
 5. Before opening the PR, do a self-review into `.work/<ID>/REVIEW.md`: bugs,
    readability, maintainability, anything outside the issue's scope.
 6. Open a draft PR with the PR template, then run `dispatch.sh review <repo> <number>`,
